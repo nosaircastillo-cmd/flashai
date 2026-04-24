@@ -436,35 +436,35 @@ function App(){
             if(supported.length>0)modelToUse=supported[0];
           }
         }catch(e){}
-        const fallbacks=["gemini-2.5-flash","gemini-2.0-flash","gemini-2.0-flash-lite","gemini-1.5-flash","gemini-1.5-pro"];
+        const fallbacks=["gemini-2.5-flash","gemini-2.0-flash","gemini-2.0-flash-lite","gemini-1.5-flash"];
         const modelsToTry=modelToUse?[modelToUse,...fallbacks.filter(m=>m!==modelToUse)]:fallbacks;
+
+        // Simpler prompt that always produces JSON
+        const geminiPrompt=`Eres un evaluador de flashcards. Analiza si la respuesta del estudiante es correcta.
+
+Pregunta: ${card.front}
+Respuesta correcta: ${card.back}
+Respuesta del estudiante: ${ans.trim()}
+
+Responde ÚNICAMENTE con este JSON (sin texto adicional, sin markdown, sin explicaciones fuera del JSON):
+{"missed":"[qué le faltó o estuvo mal, vacío si todo correcto]","didWell":"[qué acertó, vacío si todo incorrecto]","suggestion":[0 si incorrecto, 1 si parcial, 2 si correcto, 3 si perfecto]}`;
+
         let lastErr=null;
         for(const model of modelsToTry){
           try{
+            const body={
+              contents:[{parts:[{text:geminiPrompt}]}],
+              generationConfig:{maxOutputTokens:300,temperature:0}
+            };
             const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,{
               method:"POST",headers:{"Content-Type":"application/json"},
-              body:JSON.stringify({
-                contents:[{parts:[{text:prompt}]}],
-                generationConfig:{
-                  maxOutputTokens:300,
-                  temperature:0.1,
-                  responseMimeType:"application/json",
-                  responseSchema:{
-                    type:"OBJECT",
-                    properties:{
-                      missed:{type:"STRING"},
-                      didWell:{type:"STRING"},
-                      suggestion:{type:"INTEGER"}
-                    },
-                    required:["missed","didWell","suggestion"]
-                  }
-                }
-              })
+              body:JSON.stringify(body)
             });
             const data=await res.json();
-            if(data.error){lastErr=data.error.message||data.error.status;continue;}
-            aiText=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
-            if(aiText)break;
+            if(data.error){lastErr=data.error.message;continue;}
+            const txt=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
+            console.log(`[FlashAI] Gemini ${model} raw response:`,txt);
+            if(txt){aiText=txt;break;}
           }catch(e){lastErr=e.message;continue;}
         }
         if(!aiText&&lastErr)throw new Error("Gemini: "+lastErr);
@@ -479,11 +479,14 @@ function App(){
         aiText=data.content?.map(b=>b.text||"").join("")||"";
       }
 
-      const match=aiText.trim();
-      const start=match.indexOf("{");
-      const end=match.lastIndexOf("}");
-      if(start===-1||end===-1||end<=start)throw new Error("JSON no encontrado en respuesta de IA");
-      const parsed=JSON.parse(match.slice(start,end+1));
+      console.log("[FlashAI] aiText to parse:",aiText);
+      const rawTxt=aiText.trim();
+      // Strip markdown code blocks if present
+      const stripped=rawTxt.replace(/```json\s*/gi,"").replace(/```\s*/g,"").trim();
+      const start=stripped.indexOf("{");
+      const end=stripped.lastIndexOf("}");
+      if(start===-1||end===-1||end<=start)throw new Error(`Sin JSON en respuesta: "${stripped.slice(0,80)}"`);
+      const parsed=JSON.parse(stripped.slice(start,end+1));
       if(typeof parsed.suggestion!=="number")throw new Error("Campo suggestion inválido");
       setEvalR({...parsed,local:false});
     }catch(e){
