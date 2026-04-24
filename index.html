@@ -330,7 +330,7 @@ function App(){
     setTestStatus("testing");
     try{
       if(apiProvider==="gemini"){
-        const models=["gemini-2.0-flash","gemini-1.5-flash"];
+        const models=["gemini-2.0-flash-lite","gemini-2.0-flash","gemini-1.5-flash-8b","gemini-1.5-flash-002","gemini-1.5-flash-001"];
         let ok=false,lastErr="";
         for(const m of models){
           const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${k}`,{
@@ -418,7 +418,7 @@ function App(){
 
       if(apiProvider==="gemini"){
         // Try models in order until one works
-        const models=["gemini-2.0-flash","gemini-1.5-flash","gemini-1.5-flash-latest","gemini-pro"];
+        const models=["gemini-2.0-flash-lite","gemini-2.0-flash","gemini-1.5-flash-8b","gemini-1.5-flash-002","gemini-1.5-flash-001","gemini-1.0-pro"];
         let lastErr=null;
         for(const model of models){
           try{
