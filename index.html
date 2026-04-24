@@ -315,7 +315,37 @@ function App(){
     setGProf("general");setDProfs({});setDExams({});setDataLoaded(false);
     setView("home");setScreen("auth");setAUser("");setAPin("");setAErr("");
   }
-  function saveApiKey(){
+  const [testStatus,setTestStatus]=useState(null); // null | "testing" | "ok" | {err}
+  async function testApiKey(){
+    const k=(apiKeyInput.trim()||apiKey);
+    if(!k){alert("Pega una API key primero.");return;}
+    setTestStatus("testing");
+    try{
+      if(apiProvider==="gemini"){
+        const models=["gemini-2.0-flash","gemini-1.5-flash","gemini-1.5-flash-latest"];
+        let ok=false,lastErr="";
+        for(const m of models){
+          const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${k}`,{
+            method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({contents:[{parts:[{text:"Responde solo: OK"}]}],generationConfig:{maxOutputTokens:5}})
+          });
+          const d=await res.json();
+          if(d.candidates?.[0]?.content){ok=true;break;}
+          lastErr=d.error?.message||d.error?.status||"sin respuesta";
+        }
+        setTestStatus(ok?"ok":{err:lastErr||"No se pudo conectar. Verifica tu key."});
+      } else {
+        const res=await fetch("https://api.anthropic.com/v1/messages",{
+          method:"POST",
+          headers:{"Content-Type":"application/json","x-api-key":k,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+          body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:5,messages:[{role:"user",content:"Di OK"}]})
+        });
+        const d=await res.json();
+        if(d.content)setTestStatus("ok");
+        else setTestStatus({err:d.error?.message||"Error de autenticación"});
+      }
+    }catch(e){setTestStatus({err:e.message||"Error de red / CORS"});}
+  }
     const k=apiKeyInput.trim();
     if(!k){alert("Pega tu API key primero.");return;}
     if(apiProvider==="anthropic"&&!k.startsWith("sk-ant-")){alert("La key de Anthropic debe empezar con 'sk-ant-'");return;}
@@ -386,21 +416,30 @@ function App(){
       const prompt=`Evalúa la respuesta del estudiante. Devuelve SOLO JSON sin texto extra.\n\nP: ${card.front}\nCorrecta: ${card.back}\nEstudiante: ${ans.trim()}\n\nRegla estricta: incorrecta=0, parcial=1, correcta=2, perfecta=3.\n{"missed":"","didWell":"","suggestion":0}`;
 
       if(apiProvider==="gemini"){
-        const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,{
-          method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:250,temperature:0.1}})
-        });
-        if(!res.ok)throw new Error(res.status);
-        const data=await res.json();
-        aiText=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
+        // Try models in order until one works
+        const models=["gemini-2.0-flash","gemini-1.5-flash","gemini-1.5-flash-latest","gemini-pro"];
+        let lastErr=null;
+        for(const model of models){
+          try{
+            const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,{
+              method:"POST",headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:300,temperature:0.1}})
+            });
+            const data=await res.json();
+            if(data.error){lastErr=data.error.message||data.error.status;continue;}
+            aiText=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
+            if(aiText)break;
+          }catch(e){lastErr=e.message;continue;}
+        }
+        if(!aiText&&lastErr)throw new Error("Gemini: "+lastErr);
       } else {
         const res=await fetch("https://api.anthropic.com/v1/messages",{
           method:"POST",
           headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
           body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:250,messages:[{role:"user",content:prompt}]})
         });
-        if(!res.ok)throw new Error(res.status);
         const data=await res.json();
+        if(data.error)throw new Error("Anthropic: "+data.error.message);
         aiText=data.content?.map(b=>b.text||"").join("")||"";
       }
 
@@ -517,12 +556,31 @@ function App(){
         <div style={S.lbl}>PEGA TU API KEY AQUÍ</div>
         <input style={S.inp} type="password"
           placeholder={apiProvider==="gemini"?"AIzaSy...":"sk-ant-api03-..."}
-          value={apiKeyInput} onChange={e=>setApiKeyInput(e.target.value)}
+          value={apiKeyInput} onChange={e=>{setApiKeyInput(e.target.value);setTestStatus(null);}}
           onKeyDown={e=>e.key==="Enter"&&saveApiKey()}/>
 
-        <div style={{display:"flex",gap:"8px",marginTop:"18px",justifyContent:"flex-end"}}>
-          {apiKey&&<button style={{...S.bs,color:"#f87171",borderColor:"#4a1010"}} onClick={()=>{ls.del(AK_KEY);ls.del(AK_PROV);setApiKey("");setShowApiModal(false);}}>Eliminar key</button>}
-          <button style={S.bs} onClick={()=>setShowApiModal(false)}>Cancelar</button>
+        {/* Test result */}
+        {testStatus==="testing"&&<div style={{background:"#111",border:"1px solid #2a2a2a",borderRadius:"8px",padding:"8px 12px",marginTop:"10px",fontSize:"12px",color:"#888",display:"flex",alignItems:"center",gap:"8px"}}>
+          <div style={{width:"12px",height:"12px",border:"2px solid #333",borderTop:"2px solid #818cf8",borderRadius:"50%",animation:"spin .8s linear infinite",flexShrink:0}}/>
+          Probando conexión...
+        </div>}
+        {testStatus==="ok"&&<div style={{background:"#081a0e",border:"1px solid #104a22",borderRadius:"8px",padding:"8px 12px",marginTop:"10px",fontSize:"12px",color:"#4ade80"}}>
+          ✓ ¡Conexión exitosa! La IA está funcionando correctamente.
+        </div>}
+        {testStatus?.err&&<div style={{background:"#1a0808",border:"1px solid #4a1010",borderRadius:"8px",padding:"10px 12px",marginTop:"10px",fontSize:"12px",color:"#fca5a5",lineHeight:1.6}}>
+          ✗ Error: <b>{testStatus.err}</b><br/>
+          <span style={{color:"#666",fontSize:"11px"}}>
+            {testStatus.err.includes("API_KEY_INVALID")||testStatus.err.includes("invalid")?"→ La key es inválida. Cópiala de nuevo desde el sitio.":
+            testStatus.err.includes("PERMISSION")||testStatus.err.includes("403")?"→ La key no tiene permisos. En Google Cloud Console, habilita 'Generative Language API'.":
+            testStatus.err.includes("network")||testStatus.err.includes("fetch")?"→ Error de red. Verifica tu conexión a internet.":
+            "→ Verifica que la key sea correcta y que la API esté habilitada."}
+          </span>
+        </div>}
+
+        <div style={{display:"flex",gap:"8px",marginTop:"18px",justifyContent:"flex-end",flexWrap:"wrap"}}>
+          {apiKey&&<button style={{...S.bs,color:"#f87171",borderColor:"#4a1010"}} onClick={()=>{ls.del(AK_KEY);ls.del(AK_PROV);setApiKey("");setShowApiModal(false);setTestStatus(null);}}>Eliminar key</button>}
+          <button style={S.bs} onClick={()=>{setShowApiModal(false);setTestStatus(null);}}>Cancelar</button>
+          <button style={{...S.bs,color:"#818cf8",borderColor:"#818cf844"}} onClick={testApiKey} disabled={testStatus==="testing"}>🔌 Probar</button>
           <button style={S.bp(apiProvider==="gemini"?"#1a7a4a":"#818cf8")} onClick={saveApiKey}>Guardar</button>
         </div>
       </div>
