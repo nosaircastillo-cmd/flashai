@@ -440,21 +440,21 @@ function App(){
         const modelsToTry=modelToUse?[modelToUse,...fallbacks.filter(m=>m!==modelToUse)]:fallbacks;
 
         // Simpler prompt that always produces JSON
-        const geminiPrompt=`Eres un evaluador de flashcards. Analiza si la respuesta del estudiante es correcta.
+        const geminiPrompt=`Evalúa esta flashcard. Responde SOLO con JSON en una sola línea.
 
-Pregunta: ${card.front}
-Respuesta correcta: ${card.back}
-Respuesta del estudiante: ${ans.trim()}
+P: ${card.front}
+Correcta: ${card.back}
+Estudiante: ${ans.trim()}
 
-Responde ÚNICAMENTE con este JSON (sin texto adicional, sin markdown, sin explicaciones fuera del JSON):
-{"missed":"[qué le faltó o estuvo mal, vacío si todo correcto]","didWell":"[qué acertó, vacío si todo incorrecto]","suggestion":[0 si incorrecto, 1 si parcial, 2 si correcto, 3 si perfecto]}`;
+JSON (suggestion: 0=incorrecto 1=parcial 2=correcto 3=perfecto):
+{"missed":"texto breve","didWell":"texto breve","suggestion":0}`;
 
         let lastErr=null;
         for(const model of modelsToTry){
           try{
             const body={
               contents:[{parts:[{text:geminiPrompt}]}],
-              generationConfig:{maxOutputTokens:300,temperature:0}
+              generationConfig:{maxOutputTokens:512,temperature:0}
             };
             const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,{
               method:"POST",headers:{"Content-Type":"application/json"},
@@ -463,7 +463,7 @@ Responde ÚNICAMENTE con este JSON (sin texto adicional, sin markdown, sin expli
             const data=await res.json();
             if(data.error){lastErr=data.error.message;continue;}
             const txt=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
-            console.log(`[FlashAI] Gemini ${model} raw response:`,txt);
+            console.log(`[FlashAI] Gemini ${model} raw:`,JSON.stringify(txt));
             if(txt){aiText=txt;break;}
           }catch(e){lastErr=e.message;continue;}
         }
@@ -479,14 +479,31 @@ Responde ÚNICAMENTE con este JSON (sin texto adicional, sin markdown, sin expli
         aiText=data.content?.map(b=>b.text||"").join("")||"";
       }
 
-      console.log("[FlashAI] aiText to parse:",aiText);
-      const rawTxt=aiText.trim();
-      // Strip markdown code blocks if present
-      const stripped=rawTxt.replace(/```json\s*/gi,"").replace(/```\s*/g,"").trim();
-      const start=stripped.indexOf("{");
-      const end=stripped.lastIndexOf("}");
-      if(start===-1||end===-1||end<=start)throw new Error(`Sin JSON en respuesta: "${stripped.slice(0,80)}"`);
-      const parsed=JSON.parse(stripped.slice(start,end+1));
+      console.log("[FlashAI] aiText to parse:",JSON.stringify(aiText));
+      const rawTxt=aiText.trim().replace(/```json\s*/gi,"").replace(/```\s*/g,"").trim();
+      const start=rawTxt.indexOf("{");
+      let end=rawTxt.lastIndexOf("}");
+      // Recovery: if truncated (no closing brace), try to close it
+      let jsonStr=end>start?rawTxt.slice(start,end+1):"";
+      if(!jsonStr&&start!==-1){
+        // Response got truncated - extract what fields we can
+        const partial=rawTxt.slice(start);
+        const sug=partial.match(/"suggestion"\s*:\s*([0-3])/);
+        const mis=partial.match(/"missed"\s*:\s*"([^"]*)"/);
+        const did=partial.match(/"didWell"\s*:\s*"([^"]*)"/);
+        if(sug){
+          setEvalR({
+            missed:mis?mis[1]:"Revisa la respuesta correcta.",
+            didWell:did?did[1]:"",
+            suggestion:parseInt(sug[1]),
+            local:false
+          });
+          setEvalL(false);return;
+        }
+        throw new Error(`Respuesta truncada de Gemini: "${rawTxt.slice(0,60)}..."`);
+      }
+      if(!jsonStr)throw new Error(`Sin JSON en respuesta: "${rawTxt.slice(0,60)}"`);
+      const parsed=JSON.parse(jsonStr);
       if(typeof parsed.suggestion!=="number")throw new Error("Campo suggestion inválido");
       setEvalR({...parsed,local:false});
     }catch(e){
