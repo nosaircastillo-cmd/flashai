@@ -330,18 +330,25 @@ function App(){
     setTestStatus("testing");
     try{
       if(apiProvider==="gemini"){
-        const models=["gemini-2.0-flash-lite","gemini-2.0-flash","gemini-1.5-flash-8b","gemini-1.5-flash-002","gemini-1.5-flash-001"];
-        let ok=false,lastErr="";
-        for(const m of models){
-          const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent?key=${k}`,{
-            method:"POST",headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({contents:[{parts:[{text:"Responde solo: OK"}]}],generationConfig:{maxOutputTokens:5}})
-          });
-          const d=await res.json();
-          if(d.candidates?.[0]?.content){ok=true;break;}
-          lastErr=d.error?.message||d.error?.status||"sin respuesta";
-        }
-        setTestStatus(ok?"ok":{err:lastErr||"No se pudo conectar. Verifica tu key."});
+        // Get available models first
+        const listRes=await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${k}`);
+        const listData=await listRes.json();
+        if(listData.error)throw new Error(listData.error.message||listData.error.status);
+        const supported=listData.models
+          ?.filter(m=>m.supportedGenerationMethods?.includes("generateContent"))
+          ?.filter(m=>m.name.includes("gemini"))
+          ?.map(m=>m.name.replace("models/",""))||[];
+        if(supported.length===0)throw new Error("No se encontraron modelos disponibles para esta key.");
+        // Test with first available model
+        const model=supported[0];
+        const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${k}`,{
+          method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({contents:[{parts:[{text:"Responde solo: OK"}]}],generationConfig:{maxOutputTokens:5}})
+        });
+        const d=await res.json();
+        if(d.error)throw new Error(d.error.message);
+        if(d.candidates?.[0]?.content)setTestStatus({ok:true,model});
+        else throw new Error("Sin respuesta del modelo.");
       } else {
         const res=await fetch("https://api.anthropic.com/v1/messages",{
           method:"POST",
@@ -349,10 +356,10 @@ function App(){
           body:JSON.stringify({model:"claude-haiku-4-5-20251001",max_tokens:5,messages:[{role:"user",content:"Di OK"}]})
         });
         const d=await res.json();
-        if(d.content)setTestStatus("ok");
+        if(d.content)setTestStatus({ok:true,model:"claude-haiku"});
         else setTestStatus({err:d.error?.message||"Error de autenticación"});
       }
-    }catch(e){setTestStatus({err:e.message||"Error de red / CORS"});}
+    }catch(e){setTestStatus({err:e.message||"Error de red"});}
   }
 
   /* ── Derived ── */
@@ -417,10 +424,27 @@ function App(){
       const prompt=`Evalúa la respuesta del estudiante. Devuelve SOLO JSON sin texto extra.\n\nP: ${card.front}\nCorrecta: ${card.back}\nEstudiante: ${ans.trim()}\n\nRegla estricta: incorrecta=0, parcial=1, correcta=2, perfecta=3.\n{"missed":"","didWell":"","suggestion":0}`;
 
       if(apiProvider==="gemini"){
-        // Try models in order until one works
-        const models=["gemini-2.0-flash-lite","gemini-2.0-flash","gemini-1.5-flash-8b","gemini-1.5-flash-002","gemini-1.5-flash-001","gemini-1.0-pro"];
+        // Step 1: Get available models for this key
+        let modelToUse=null;
+        try{
+          const listRes=await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+          const listData=await listRes.json();
+          if(listData.models){
+            // Find first model that supports generateContent and is a gemini model
+            const supported=listData.models
+              .filter(m=>m.supportedGenerationMethods?.includes("generateContent"))
+              .filter(m=>m.name.includes("gemini"))
+              .map(m=>m.name.replace("models/",""));
+            if(supported.length>0)modelToUse=supported[0];
+          }
+        }catch(e){/* ignore, try fallback list */}
+
+        // Step 2: fallback list if ListModels failed
+        const fallbacks=["gemini-2.0-flash","gemini-2.0-flash-lite","gemini-1.5-flash","gemini-1.5-pro","gemini-pro"];
+        const modelsToTry=modelToUse?[modelToUse,...fallbacks]:fallbacks;
+
         let lastErr=null;
-        for(const model of models){
+        for(const model of modelsToTry){
           try{
             const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,{
               method:"POST",headers:{"Content-Type":"application/json"},
@@ -428,8 +452,8 @@ function App(){
             });
             const data=await res.json();
             if(data.error){lastErr=data.error.message||data.error.status;continue;}
-            aiText=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
-            if(aiText)break;
+            const txt=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
+            if(txt){aiText=txt;break;}
           }catch(e){lastErr=e.message;continue;}
         }
         if(!aiText&&lastErr)throw new Error("Gemini: "+lastErr);
@@ -565,8 +589,8 @@ function App(){
           <div style={{width:"12px",height:"12px",border:"2px solid #333",borderTop:"2px solid #818cf8",borderRadius:"50%",animation:"spin .8s linear infinite",flexShrink:0}}/>
           Probando conexión...
         </div>}
-        {testStatus==="ok"&&<div style={{background:"#081a0e",border:"1px solid #104a22",borderRadius:"8px",padding:"8px 12px",marginTop:"10px",fontSize:"12px",color:"#4ade80"}}>
-          ✓ ¡Conexión exitosa! La IA está funcionando correctamente.
+        {testStatus?.ok&&<div style={{background:"#081a0e",border:"1px solid #104a22",borderRadius:"8px",padding:"8px 12px",marginTop:"10px",fontSize:"12px",color:"#4ade80"}}>
+          ✓ ¡Conexión exitosa! Modelo: <b>{testStatus.model}</b>
         </div>}
         {testStatus?.err&&<div style={{background:"#1a0808",border:"1px solid #4a1010",borderRadius:"8px",padding:"10px 12px",marginTop:"10px",fontSize:"12px",color:"#fca5a5",lineHeight:1.6}}>
           ✗ Error: <b>{testStatus.err}</b><br/>
