@@ -468,13 +468,18 @@ function App(){
         aiText=data.content?.map(b=>b.text||"").join("")||"";
       }
 
-      const match=aiText.trim().match(/\{[\s\S]*?\}/);
-      if(!match)throw new Error("no json");
-      const parsed=JSON.parse(match[0]);
-      if(typeof parsed.suggestion!=="number")throw new Error("bad");
-      setEvalR(parsed);
-    }catch{
-      setEvalR(localEval(ans.trim(), card.back||"", card.front||"", false));
+      const match=aiText.trim();
+      const start=match.indexOf("{");
+      const end=match.lastIndexOf("}");
+      if(start===-1||end===-1||end<=start)throw new Error("JSON no encontrado en respuesta de IA");
+      const parsed=JSON.parse(match.slice(start,end+1));
+      if(typeof parsed.suggestion!=="number")throw new Error("Campo suggestion inválido");
+      setEvalR({...parsed,local:false});
+    }catch(e){
+      console.error("FlashAI eval error:",e.message);
+      const r=localEval(ans.trim(),card.back||"",card.front||"",false);
+      r.debugErr=e.message;
+      setEvalR(r);
     }
     setEvalL(false);
   }
@@ -986,10 +991,10 @@ function App(){
             {flipped&&<><div style={{borderTop:`1px solid ${BR}`,height:"1px"}}/><div style={{padding:"14px 18px"}}>{card?.backImg&&<img src={card.backImg} alt="" style={{maxWidth:"100%",maxHeight:"140px",borderRadius:"10px",objectFit:"contain",marginBottom:"10px",display:"block"}}/>}{card?.back&&<div style={{fontSize:"15px",color:"#d1d5db",lineHeight:1.55}}>{card.back}</div>}</div></>}
           </div>
           {flipped&&<div style={{margin:"8px 16px 0"}}>{evalL&&<div style={{background:"#111827",border:"1px solid #1f2937",borderRadius:"12px",padding:"12px 14px",fontSize:"13px",color:"#6b7280"}}>✦ Analizando tu respuesta...</div>}{evalR&&<div style={{display:"flex",flexDirection:"column",gap:"7px"}}>
-            {evalR.local&&<div style={{background:"#1a1a0a",border:"1px solid #3a3a10",borderRadius:"8px",padding:"6px 12px",fontSize:"11px",color:"#888",display:"flex",alignItems:"center",gap:"6px"}}>
+            {evalR.local&&<div style={{background:"#1a1a0a",border:"1px solid #3a3a10",borderRadius:"8px",padding:"6px 12px",fontSize:"11px",color:"#888",display:"flex",alignItems:"center",gap:"6px",flexWrap:"wrap"}}>
               <span>⚠️</span>
-              <span>{apiKey?"Error de conexión con la IA — usando evaluación local":"Sin API key — usando evaluación local básica"}</span>
-              <button onClick={()=>setShowApiModal(true)} style={{background:"#2a2a10",border:"1px solid #4a4a20",borderRadius:"5px",padding:"2px 8px",cursor:"pointer",fontSize:"10px",color:"#fbbf24",marginLeft:"auto"}}>Configurar IA</button>
+              <span style={{flex:1}}>{apiKey?`Error de IA: ${evalR.debugErr||"conexión fallida"}`:"Sin API key — evaluación local básica"}</span>
+              <button onClick={()=>setShowApiModal(true)} style={{background:"#2a2a10",border:"1px solid #4a4a20",borderRadius:"5px",padding:"2px 8px",cursor:"pointer",fontSize:"10px",color:"#fbbf24"}}>Configurar IA</button>
             </div>}
             {evalR.missed&&<div style={{background:"#1a0808",border:"1px solid #4a1010",borderRadius:"12px",padding:"11px 13px"}}><span style={{background:"#ef4444",color:"#fff",fontSize:"10px",fontWeight:"700",padding:"2px 8px",borderRadius:"5px"}}>✗ Lo que te faltó</span><div style={{fontSize:"13px",color:"#fca5a5",lineHeight:1.6,marginTop:"6px"}}>{evalR.missed}</div></div>}
             {evalR.didWell&&<div style={{background:"#081a0e",border:"1px solid #104a22",borderRadius:"12px",padding:"11px 13px"}}><span style={{background:"#22c55e",color:"#fff",fontSize:"10px",fontWeight:"700",padding:"2px 8px",borderRadius:"5px"}}>✓ Lo que hiciste bien</span><div style={{fontSize:"13px",color:"#86efac",lineHeight:1.6,marginTop:"6px"}}>{evalR.didWell}</div></div>}
