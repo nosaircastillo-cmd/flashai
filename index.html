@@ -137,6 +137,65 @@ function Spin({msg="Cargando..."}){
   </div>;
 }
 
+/* ── Smart local evaluator (no API needed) ────────────────────────────────── */
+function localEval(student, correct, question, noApiKey){
+  const s=student.trim().toLowerCase().replace(/\s+/g," ");
+  const c=correct.trim().toLowerCase().replace(/\s+/g," ");
+  const source=noApiKey?"(evaluación local — configura IA para mejor análisis)":"(sin conexión — evaluación local)";
+
+  // Exact match
+  if(s===c)return{missed:"",didWell:"¡Respuesta exactamente correcta!",suggestion:3,local:true};
+
+  // Normalize: remove spaces around operators for math
+  const norm=t=>t.replace(/\s*([\+\-\=\*\/\^])\s*/g,"$1");
+  if(norm(s)===norm(c))return{missed:"",didWell:"¡Correcto! (diferencia solo en espacios)",suggestion:3,local:true};
+
+  // Character-level similarity (good for formulas/short answers)
+  function similarity(a,b){
+    if(!a||!b)return 0;
+    const longer=a.length>b.length?a:b;
+    const shorter=a.length>b.length?b:a;
+    if(longer.length===0)return 1;
+    let matches=0;
+    for(let i=0;i<shorter.length;i++)if(longer.includes(shorter[i]))matches++;
+    return matches/longer.length;
+  }
+  const charSim=similarity(norm(s),norm(c));
+
+  // Check if student answer is a subset (got the start right, missed the end)
+  const isPrefix=norm(c).startsWith(norm(s));
+  const isSuffix=norm(c).endsWith(norm(s));
+  const isContained=norm(c).includes(norm(s));
+
+  // Word-level overlap for longer answers
+  const sw=s.split(/[\s,;]+/).filter(w=>w.length>1);
+  const cw=c.split(/[\s,;]+/).filter(w=>w.length>1);
+  const matchedW=cw.filter(w=>s.includes(w));
+  const wordScore=cw.length>0?matchedW.length/cw.length:0;
+
+  // Find what's missing (characters/parts in correct but not in student answer)
+  const missingParts=[];
+  if(isPrefix){
+    const missing=correct.trim().slice(student.trim().length).trim();
+    if(missing)missingParts.push(`Te faltó completar: "…${missing}"`);
+  }
+
+  const score=Math.max(charSim,wordScore);
+
+  if(score>=0.95){
+    return{missed:`Casi perfecta, pequeña diferencia. Correcta: "${correct}" ${source}`,didWell:"Respuesta casi idéntica a la correcta.",suggestion:2,local:true};
+  } else if(score>=0.7||isContained){
+    const msg=missingParts.length?missingParts[0]:`Tu respuesta está incompleta. Correcta: "${correct}"`;
+    return{missed:`${msg} ${source}`,didWell:"Captaste la idea principal.",suggestion:2,local:true};
+  } else if(score>=0.4||isPrefix||isSuffix){
+    return{missed:`Respuesta parcial. Correcta: "${correct}" ${source}`,didWell:matchedW.length>0?`Acertaste: ${matchedW.slice(0,3).join(", ")}`:undefined,suggestion:1,local:true};
+  } else if(score>=0.2){
+    return{missed:`Respuesta incorrecta o muy incompleta. Correcta: "${correct}" ${source}`,didWell:"",suggestion:0,local:true};
+  } else {
+    return{missed:`Respuesta incorrecta. La correcta es: "${correct}" ${source}`,didWell:"",suggestion:0,local:true};
+  }
+}
+
 /* ══════════════════════════════════════════════════════════════════════════ */
 function App(){
   /* auth */
@@ -319,12 +378,7 @@ function App(){
     const ha=ans.trim().length>0;
     if(!ha){setEvalR({missed:`Respuesta correcta: ${card.back||"—"}`,didWell:"",suggestion:0});setEvalL(false);return;}
     if(!apiKey){
-      const sN=ans.trim().toLowerCase(),cN=(card.back||"").trim().toLowerCase();
-      if(sN===cN){setEvalR({missed:"",didWell:"Respuesta exactamente correcta.",suggestion:3});}
-      else{const cw=cN.split(/\s+/).filter(w=>w.length>3),mw=cw.filter(w=>sN.includes(w)),sc=cw.length>0?mw.length/cw.length:0;
-        if(sc>.6)setEvalR({missed:"Faltaron detalles.",didWell:"Mencionaste los puntos principales.",suggestion:2});
-        else if(sc>.2)setEvalR({missed:`Respuesta incompleta. Correcta: ${card.back}`,didWell:"",suggestion:1});
-        else setEvalR({missed:`Incorrecto. Respuesta: ${card.back}`,didWell:"",suggestion:0});}
+      setEvalR(localEval(ans.trim(), card.back||"", card.front||"", true));
       setEvalL(false);return;
     }
     try{
@@ -356,12 +410,7 @@ function App(){
       if(typeof parsed.suggestion!=="number")throw new Error("bad");
       setEvalR(parsed);
     }catch{
-      const sN=ans.trim().toLowerCase(),cN=(card.back||"").trim().toLowerCase();
-      if(sN===cN){setEvalR({missed:"",didWell:"Respuesta exactamente correcta.",suggestion:3});}
-      else{const cw=cN.split(/\s+/).filter(w=>w.length>3),mw=cw.filter(w=>sN.includes(w)),sc=cw.length>0?mw.length/cw.length:0;
-        if(sc>.6)setEvalR({missed:"Faltaron algunos detalles.",didWell:"Mencionaste los puntos principales.",suggestion:2});
-        else if(sc>.2)setEvalR({missed:`Incompleta. Correcta: ${card.back}`,didWell:"",suggestion:1});
-        else setEvalR({missed:`Incorrecto. Respuesta: ${card.back}`,didWell:"",suggestion:0});}
+      setEvalR(localEval(ans.trim(), card.back||"", card.front||"", false));
     }
     setEvalL(false);
   }
@@ -853,7 +902,15 @@ function App(){
             <div style={{padding:"14px 18px 16px"}}>{card?.frontImg&&<img src={card.frontImg} alt="" style={{maxWidth:"100%",maxHeight:"140px",borderRadius:"10px",objectFit:"contain",marginBottom:"10px",display:"block"}}/>}{card?.front&&<div style={{fontSize:"17px",fontWeight:"700",color:TX,lineHeight:1.45}}>{card.front}</div>}</div>
             {flipped&&<><div style={{borderTop:`1px solid ${BR}`,height:"1px"}}/><div style={{padding:"14px 18px"}}>{card?.backImg&&<img src={card.backImg} alt="" style={{maxWidth:"100%",maxHeight:"140px",borderRadius:"10px",objectFit:"contain",marginBottom:"10px",display:"block"}}/>}{card?.back&&<div style={{fontSize:"15px",color:"#d1d5db",lineHeight:1.55}}>{card.back}</div>}</div></>}
           </div>
-          {flipped&&<div style={{margin:"8px 16px 0"}}>{evalL&&<div style={{background:"#111827",border:"1px solid #1f2937",borderRadius:"12px",padding:"12px 14px",fontSize:"13px",color:"#6b7280"}}>✦ Analizando tu respuesta...</div>}{evalR&&<div style={{display:"flex",flexDirection:"column",gap:"7px"}}>{evalR.missed&&<div style={{background:"#1a0808",border:"1px solid #4a1010",borderRadius:"12px",padding:"11px 13px"}}><span style={{background:"#ef4444",color:"#fff",fontSize:"10px",fontWeight:"700",padding:"2px 8px",borderRadius:"5px"}}>✗ Lo que te faltó</span><div style={{fontSize:"13px",color:"#fca5a5",lineHeight:1.6,marginTop:"6px"}}>{evalR.missed}</div></div>}{evalR.didWell&&<div style={{background:"#081a0e",border:"1px solid #104a22",borderRadius:"12px",padding:"11px 13px"}}><span style={{background:"#22c55e",color:"#fff",fontSize:"10px",fontWeight:"700",padding:"2px 8px",borderRadius:"5px"}}>✓ Lo que hiciste bien</span><div style={{fontSize:"13px",color:"#86efac",lineHeight:1.6,marginTop:"6px"}}>{evalR.didWell}</div></div>}</div>}</div>}
+          {flipped&&<div style={{margin:"8px 16px 0"}}>{evalL&&<div style={{background:"#111827",border:"1px solid #1f2937",borderRadius:"12px",padding:"12px 14px",fontSize:"13px",color:"#6b7280"}}>✦ Analizando tu respuesta...</div>}{evalR&&<div style={{display:"flex",flexDirection:"column",gap:"7px"}}>
+            {evalR.local&&<div style={{background:"#1a1a0a",border:"1px solid #3a3a10",borderRadius:"8px",padding:"6px 12px",fontSize:"11px",color:"#888",display:"flex",alignItems:"center",gap:"6px"}}>
+              <span>⚠️</span>
+              <span>{apiKey?"Error de conexión con la IA — usando evaluación local":"Sin API key — usando evaluación local básica"}</span>
+              <button onClick={()=>setShowApiModal(true)} style={{background:"#2a2a10",border:"1px solid #4a4a20",borderRadius:"5px",padding:"2px 8px",cursor:"pointer",fontSize:"10px",color:"#fbbf24",marginLeft:"auto"}}>Configurar IA</button>
+            </div>}
+            {evalR.missed&&<div style={{background:"#1a0808",border:"1px solid #4a1010",borderRadius:"12px",padding:"11px 13px"}}><span style={{background:"#ef4444",color:"#fff",fontSize:"10px",fontWeight:"700",padding:"2px 8px",borderRadius:"5px"}}>✗ Lo que te faltó</span><div style={{fontSize:"13px",color:"#fca5a5",lineHeight:1.6,marginTop:"6px"}}>{evalR.missed}</div></div>}
+            {evalR.didWell&&<div style={{background:"#081a0e",border:"1px solid #104a22",borderRadius:"12px",padding:"11px 13px"}}><span style={{background:"#22c55e",color:"#fff",fontSize:"10px",fontWeight:"700",padding:"2px 8px",borderRadius:"5px"}}>✓ Lo que hiciste bien</span><div style={{fontSize:"13px",color:"#86efac",lineHeight:1.6,marginTop:"6px"}}>{evalR.didWell}</div></div>}
+          </div>}</div>}
           {!flipped?<div style={{margin:"10px 16px 0"}}><div style={{background:"#101010",borderRadius:"14px",border:"1px solid #2a2a2a",overflow:"hidden"}}><textarea style={{...S.ta,padding:"13px 15px",minHeight:"78px",fontSize:"14px",display:"block"}} placeholder="Escribe tu respuesta aquí... (opcional)" value={ans} onChange={e=>setAns(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey))showAns();}}/><div style={{borderTop:"1px solid #1e1e1e",padding:"6px 13px",display:"flex",justifyContent:"space-between"}}><span style={{fontSize:"10px",color:"#2e2e2e"}}>Ctrl+↩ para revelar</span><span style={{fontSize:"10px",color:"#3a3a3a"}}>{ans.length>0?`${ans.length} car.`:"Puedes dejarlo vacío"}</span></div></div></div>
             :(ans.trim()&&<div style={{margin:"8px 16px 0",background:"#0d0d10",border:"1px solid #1e1e2e",borderRadius:"12px",padding:"10px 13px"}}><div style={{fontSize:"10px",color:"#444",fontWeight:"700",letterSpacing:".08em",marginBottom:"4px"}}>TU RESPUESTA</div><div style={{fontSize:"13px",color:"#8b8b9e",lineHeight:1.5}}>{ans}</div></div>)}
         </div>
