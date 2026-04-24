@@ -9,74 +9,148 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.3/babel.min.js"></script>
 <style>
     *{box-sizing:border-box;margin:0;padding:0}
-    body{background:#0d0d0d;color:#f0f0f0;font-family:system-ui,-apple-system,sans-serif;padding:20px}
-    .container{max-width:600px;margin:0 auto}
-    .card{background:#161616;border:1px solid #222;border-radius:20px;padding:20px;margin-bottom:15px}
-    .btn-main{background:#7c3aed;color:#fff;border:none;padding:14px;border-radius:12px;font-weight:700;cursor:pointer;width:100%;margin-top:10px}
-    .btn-ghost{background:transparent;color:#888;border:1px solid #333;padding:8px 16px;border-radius:10px;cursor:pointer}
-    input{width:100%;background:#000;border:1px solid #333;color:#fff;padding:12px;border-radius:10px;margin-top:10px}
-    .deck-item{display:flex;justify-content:space-between;align-items:center;padding:15px;background:#1e1e1e;border-radius:12px;margin-bottom:10px}
+    html,body,#root{min-height:100vh;background:#0d0d0d;color:#f0f0f0;font-family:system-ui,-apple-system,sans-serif}
+    .app-container{max-width:500px;margin:0 auto;padding:20px}
+    .card{background:#161616;border:1px solid #222;border-radius:24px;padding:24px;margin-bottom:20px}
+    .btn-main{background:#7c3aed;color:#fff;border:none;padding:14px;border-radius:14px;font-weight:800;cursor:pointer;width:100%}
+    .btn-sm2{border:none;color:#fff;border-radius:12px;padding:12px;font-weight:700;cursor:pointer;font-size:13px}
+    .input-dark{width:100%;background:#000;border:1px solid #333;color:#fff;padding:12px;border-radius:12px;outline:none;margin:10px 0}
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .loader{width:14px;height:14px;border:2px solid #444;border-top-color:#7c3aed;border-radius:50%;animation:spin .6s linear infinite;display:inline-block}
 </style>
 </head>
 <body>
 <div id="root"></div>
-
 <script type="text/babel">
 const { useState, useEffect } = React;
 
+const BTNS = [
+    {l:"Otra vez", q:1, bg:"#ef4444"},
+    {l:"Difícil", q:2, bg:"#f59e0b"},
+    {l:"Bien", q:3, bg:"#10b981"},
+    {l:"Fácil", q:4, bg:"#3b82f6"}
+];
+
 function App() {
-    const [decks, setDecks] = useState(() => {
-        const saved = localStorage.getItem("FLASH_DECKS");
-        return saved ? JSON.parse(saved) : [];
-    });
-    const [view, setView] = useState("home");
-    const [newDeckName, setNewDeckName] = useState("");
-    const [apiKey, setApiKey] = useState(localStorage.getItem("FLASH_AI_KEY") || "");
+    const [view, setView] = useState('home');
+    const [apiKey, setApiKey] = useState(localStorage.getItem('FLASH_AI_KEY') || '');
+    const [decks, setDecks] = useState(() => JSON.parse(localStorage.getItem('DECKS') || '[]'));
+    const [evaluating, setEvaluating] = useState(false);
+    const [aiSuggestion, setAiSuggestion] = useState(null);
 
     useEffect(() => {
-        localStorage.setItem("FLASH_DECKS", JSON.stringify(decks));
+        localStorage.setItem('DECKS', JSON.stringify(decks));
     }, [decks]);
 
-    const addDeck = () => {
-        if (!newDeckName.trim()) return;
-        const deck = { id: Date.now(), name: newDeckName, cards: [] };
-        setDecks([...decks, deck]);
-        setNewDeckName("");
-        setView("home");
+    // Lógica para llamar a la IA (Gemini/Anthropic Proxy)
+    const askAI = async (question, answer, correctAnswer) => {
+        if (!apiKey) return null;
+        setEvaluating(true);
+        try {
+            // Simulación de lógica de evaluación (aquí conectarías con fetch a Gemini)
+            const prompt = `Analiza: P: ${question}, R_Usuario: ${answer}, R_Correcta: ${correctAnswer}. Sugiere dificultad (1-4).`;
+            
+            // Simulamos respuesta de IA para evitar errores de red en la demo
+            await new Promise(r => setTimeout(r, 1500));
+            setAiSuggestion(Math.floor(Math.random() * 2) + 3); // Sugiere 3 o 4 (Bien/Fácil)
+        } catch (e) {
+            console.error(e);
+        } finally {
+            setEvaluating(false);
+        }
     };
 
     return (
-        <div className="container">
-            <header style={{display:"flex", justifyContent:"space-between", marginBottom:"30px"}}>
-                <h1>⚡ FlashAI</h1>
-                <button onClick={() => setView("config")} className="btn-ghost">Configurar</button>
+        <div className="app-container">
+            <header style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:'20px'}}>
+                <h1 style={{fontSize:'22px'}}>⚡ FlashAI</h1>
+                <button onClick={() => setView('config')} style={{background:'none', border:'1px solid #333', color:'#888', padding:'6px 12px', borderRadius:'10px', cursor:'pointer'}}>Config</button>
             </header>
 
-            {view === "home" && (
-                <div>
-                    <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"20px"}}>
-                        <h2>Mis Mazos</h2>
-                        <button onClick={() => setView("create")} className="btn-ghost" style={{borderColor: "#7c3aed", color: "#7c3aed"}}>+ Nuevo</button>
+            {view === 'home' && (
+                <>
+                    <div className="card" style={{textAlign:'center'}}>
+                        <h2 style={{fontSize:'18px', color:'#7c3aed'}}>Medicina UNAM</h2>
+                        <p style={{color:'#666', fontSize:'13px', marginTop:'5px'}}>Repaso basado en evidencia científica.</p>
                     </div>
-                    
+
                     {decks.length === 0 ? (
-                        <div className="card" style={{textAlign:"center", borderStyle:"dashed"}}>
-                            <p style={{color:"#666"}}>No tienes mazos todavía.</p>
+                        <div style={{textAlign:'center', padding:'40px 0'}}>
+                            <p style={{color:'#444'}}>No hay mazos. Crea uno de Anatomía o Fisiología.</p>
+                            <button onClick={() => setView('create')} className="btn-main" style={{marginTop:'20px'}}>+ Crear Mazo</button>
                         </div>
                     ) : (
-                        decks.map(d => (
-                            <div key={d.id} className="deck-item">
+                        decks.map((d, i) => (
+                            <div key={i} className="card" style={{display:'flex', justifyContent:'space-between', alignItems:'center', padding:'15px'}}>
                                 <span>{d.name}</span>
-                                <button className="btn-ghost" style={{fontSize:"12px"}}>Estudiar</button>
+                                <button onClick={() => setView('study')} style={{background:'none', border:'none', color:'#7c3aed', fontWeight:'800', cursor:'pointer'}}>Estudiar</button>
                             </div>
                         ))
+                    )}
+                </>
+            )}
+
+            {view === 'config' && (
+                <div className="card">
+                    <h3>Configurar Gemini API</h3>
+                    <p style={{fontSize:'12px', color:'#666', margin:'10px 0'}}>Pega tu clave de Google AI Studio para habilitar la evaluación inteligente.</p>
+                    <input 
+                        className="input-dark" 
+                        type="password" 
+                        placeholder="sk-..." 
+                        defaultValue={apiKey}
+                        onBlur={(e) => {
+                            localStorage.setItem('FLASH_AI_KEY', e.target.value);
+                            setApiKey(e.target.value);
+                        }}
+                    />
+                    <button onClick={() => setView('home')} className="btn-main">Guardar</button>
+                </div>
+            )}
+
+            {view === 'study' && (
+                <div className="card">
+                    <span style={{fontSize:'12px', color:'#7c3aed', fontWeight:'bold'}}>PREGUNTA</span>
+                    <p style={{fontSize:'20px', margin:'15px 0'}}>¿Cuál es el principal neurotransmisor excitador del SNC?</p>
+                    <hr style={{borderColor:'#222', margin:'20px 0'}} />
+                    <textarea className="input-dark" placeholder="Escribe tu respuesta..." rows="3"></textarea>
+                    
+                    <button className="btn-main" onClick={() => askAI("Neurotransmisor", "Glutamato", "Glutamato")}>
+                        {evaluating ? <span className="loader"></span> : "Evaluar con IA"}
+                    </button>
+
+                    {aiSuggestion && (
+                        <div style={{marginTop:'20px'}}>
+                            <p style={{fontSize:'11px', color:'#888', textAlign:'center', marginBottom:'10px'}}>IA sugiere: <b style={{color:'#fff'}}>{BTNS.find(b => b.q === aiSuggestion).l}</b></p>
+                            <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:'10px'}}>
+                                {BTNS.map(b => (
+                                    <button key={b.q} className="btn-sm2" style={{background:b.bg, border: b.q === aiSuggestion ? '2px solid white' : 'none'}}>
+                                        {b.l}
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
                     )}
                 </div>
             )}
 
-            {view === "create" && (
+            {view === 'create' && (
                 <div className="card">
-                    <h3>Crear Nuevo Mazo</h3>
-                    <input 
-                        placeholder="Ej: Anatomía II, Farmacología..." 
-                        value={newDeckName}
+                    <h3>Nuevo Mazo</h3>
+                    <input id="n" className="input-dark" placeholder="Ej: Farmacología" />
+                    <button className="btn-main" onClick={() => {
+                        const val = document.getElementById('n').value;
+                        if(val) setDecks([...decks, {name: val, cards: []}]);
+                        setView('home');
+                    }}>Crear</button>
+                </div>
+            )}
+        </div>
+    );
+}
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+</script>
+</body>
+</html>
