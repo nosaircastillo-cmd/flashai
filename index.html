@@ -424,36 +424,47 @@ function App(){
       const prompt=`Evalúa la respuesta del estudiante. Devuelve SOLO JSON sin texto extra.\n\nP: ${card.front}\nCorrecta: ${card.back}\nEstudiante: ${ans.trim()}\n\nRegla estricta: incorrecta=0, parcial=1, correcta=2, perfecta=3.\n{"missed":"","didWell":"","suggestion":0}`;
 
       if(apiProvider==="gemini"){
-        // Step 1: Get available models for this key
         let modelToUse=null;
         try{
           const listRes=await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
           const listData=await listRes.json();
           if(listData.models){
-            // Find first model that supports generateContent and is a gemini model
             const supported=listData.models
               .filter(m=>m.supportedGenerationMethods?.includes("generateContent"))
               .filter(m=>m.name.includes("gemini"))
               .map(m=>m.name.replace("models/",""));
             if(supported.length>0)modelToUse=supported[0];
           }
-        }catch(e){/* ignore, try fallback list */}
-
-        // Step 2: fallback list if ListModels failed
-        const fallbacks=["gemini-2.0-flash","gemini-2.0-flash-lite","gemini-1.5-flash","gemini-1.5-pro","gemini-pro"];
-        const modelsToTry=modelToUse?[modelToUse,...fallbacks]:fallbacks;
-
+        }catch(e){}
+        const fallbacks=["gemini-2.5-flash","gemini-2.0-flash","gemini-2.0-flash-lite","gemini-1.5-flash","gemini-1.5-pro"];
+        const modelsToTry=modelToUse?[modelToUse,...fallbacks.filter(m=>m!==modelToUse)]:fallbacks;
         let lastErr=null;
         for(const model of modelsToTry){
           try{
             const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,{
               method:"POST",headers:{"Content-Type":"application/json"},
-              body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:300,temperature:0.1}})
+              body:JSON.stringify({
+                contents:[{parts:[{text:prompt}]}],
+                generationConfig:{
+                  maxOutputTokens:300,
+                  temperature:0.1,
+                  responseMimeType:"application/json",
+                  responseSchema:{
+                    type:"OBJECT",
+                    properties:{
+                      missed:{type:"STRING"},
+                      didWell:{type:"STRING"},
+                      suggestion:{type:"INTEGER"}
+                    },
+                    required:["missed","didWell","suggestion"]
+                  }
+                }
+              })
             });
             const data=await res.json();
             if(data.error){lastErr=data.error.message||data.error.status;continue;}
-            const txt=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
-            if(txt){aiText=txt;break;}
+            aiText=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
+            if(aiText)break;
           }catch(e){lastErr=e.message;continue;}
         }
         if(!aiText&&lastErr)throw new Error("Gemini: "+lastErr);
