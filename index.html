@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>FlashAI — Repaso espaciado inteligente</title>
+<meta name="description" content="Flashcards con algoritmo SM-2, evaluación IA y cuentas de usuario. Gratis y de código abierto."/>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.3/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body,#root{min-height:100vh;background:#0d0d0d;color:#f0f0f0;font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:#111}
+::-webkit-scrollbar-thumb{background:#2a2a2a;border-radius:4px}
+input,textarea,select,button{font-family:inherit}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+@keyframes fadein{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+const {useState,useEffect,useCallback,useRef}=React;
+
+/* ── Constants ────────────────────────────────────────────────────────────── */
+const DC=["#7c3aed","#dc2626","#16a34a","#2563eb","#d97706","#0f766e","#be185d","#4338ca"];
+const PROF={
+  general:  {id:"general",  icon:"😎",name:"General",   ease:2.5,npd:20,maxI:365,g:[1,4],  col:"#4ade80",desc:"Recomendado. Ideal si tu examen es en 3+ semanas."},
+  casual:   {id:"casual",   icon:"🤡",name:"Casual",     ease:2.3,npd:10,maxI:180,g:[1,3],  col:"#fbbf24",desc:"Poco tiempo. Para idiomas o entendimiento general."},
+  screwed:  {id:"screwed",  icon:"😱",name:"Urgente",    ease:2.5,npd:60,maxI:30, g:[.5,1], col:"#f87171",desc:"¿Empezaste tarde? Estudiarás tarjetas dos veces al día."},
+  medschool:{id:"medschool",icon:"🥼",name:"Med School", ease:2.7,npd:30,maxI:365,g:[1,4],  col:"#818cf8",desc:"Para medicina (AnKing). Estudia más, saca 10.",exam:true},
+  custom:   {id:"custom",   icon:"⚙️",name:"Personalizado",ease:2.5,npd:20,maxI:365,g:[1,4],col:"#94a3b8",desc:"Define tus propios parámetros."},
+};
+const BG="#0d0d0d",SF="#161616",CB="#1b1b1b",BR="#222",TX="#f0f0f0",MT="#555",SB="#888";
+const LBLS=["De nuevo","Difícil","Bien","Fácil"];
+const ACCOUNTS_KEY="fai_v2_accts";
+const uKey=u=>`fai_v2_data_${u}`;
+const SES_KEY="fai_v2_ses";
+const AK_KEY="fai_v2_ak";
+
+/* ── localStorage helpers ─────────────────────────────────────────────────── */
+const ls={
+  get:k=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):null;}catch{return null;}},
+  set:(k,v)=>{try{localStorage.setItem(k,JSON.stringify(v));}catch{}},
+  del:k=>{try{localStorage.removeItem(k);}catch{}},
+};
+
+/* ── SM-2 ─────────────────────────────────────────────────────────────────── */
+function sm2(card,q,p){
+  let{interval:iv=1,repetitions:rp=0,easeFactor:ef=p.ease}=card;
+  const[g1,g4]=p.g;
+  if(q===0){iv=g1;rp=0;ef=Math.max(1.3,ef-.2);}
+  else if(q===1){iv=Math.max(g1,Math.round(iv*1.2));ef=Math.max(1.3,ef-.15);rp=Math.max(1,rp);}
+  else if(q===2){iv=rp===0?g1:rp===1?g4:Math.min(Math.round(iv*ef),p.maxI);rp++;}
+  else{iv=rp===0?Math.ceil(g1*1.5):rp===1?Math.ceil(g4*1.3):Math.min(Math.round(iv*ef*1.3),p.maxI);ef=Math.min(3,ef+.15);rp++;}
+  iv=Math.max(g1,iv);
+  const d=new Date();d.setDate(d.getDate()+iv);
+  return{interval:iv,repetitions:rp,easeFactor:ef,dueDate:d.toISOString()};
+}
+const isDue=c=>!c.dueDate||new Date(c.dueDate)<=new Date();
+const nxtL=(c,q,p)=>{const r=sm2(c,q,p);return r.interval<1?`<${Math.round(r.interval*24*60)}m`:r.interval<2?"~1d":`~${Math.round(r.interval)}d`;};
+
+/* ── Parsers / helpers ────────────────────────────────────────────────────── */
+function parseTxt(txt){
+  const cards=[],lines=txt.trim().split("\n");
+  for(let i=0;i<lines.length;i++){
+    const l=lines[i].trim();if(!l)continue;
+    if(/^[QPqp]:/.test(l)){const f=l.replace(/^[QPqp]:\s*/,""),n=lines[i+1]?.trim()||"";if(/^[ARar]:/.test(n)){cards.push({front:f,back:n.replace(/^[ARar]:\s*/,"")});i++;continue;}}
+    const sep=l.includes("\t")?"\t":l.includes(";")?";":l.includes("|")?"|":null;
+    if(sep){const[f,...b]=l.split(sep);if(f&&b.length)cards.push({front:f.trim(),back:b.join(sep).trim()});}
+  }
+  return cards;
+}
+async function compressImg(url){
+  return new Promise(res=>{
+    const img=new Image();
+    img.onload=()=>{const sc=Math.min(1,800/img.width),c=document.createElement("canvas");c.width=Math.round(img.width*sc);c.height=Math.round(img.height*sc);c.getContext("2d").drawImage(img,0,0,c.width,c.height);res(c.toDataURL("image/jpeg",.72));};
+    img.onerror=()=>res(url);img.src=url;
+  });
+}
+function hashPin(pin){let h=5381;for(let i=0;i<pin.length;i++)h=((h<<5)+h)+pin.charCodeAt(i);return(h>>>0).toString(36);}
+const uid=()=>`${Date.now()}_${Math.random().toString(36).slice(2)}`;
+const fmt=d=>new Date(d).toLocaleDateString("es-MX",{day:"2-digit",month:"short",year:"numeric"});
+function calcExam(cards,examDate,p){
+  const t=new Date();t.setHours(0,0,0,0);const e=new Date(examDate);e.setHours(23,59,59,0);
+  const dL=Math.max(1,Math.ceil((e-t)/86400000)),tot=cards.length;
+  const mst=cards.filter(c=>c.repetitions>=3&&!isDue(c)).length;
+  const pct=tot?Math.round(mst/tot*100):0;
+  const due=cards.filter(c=>!c.dueDate||new Date(c.dueDate)<=e).length;
+  return{dL,tot,mst,pct,dt:Math.max(1,Math.ceil(due/dL)),conf:Math.min(100,Math.round(pct*.7+Math.min(30,dL)))};
+}
+
+/* ── Style helpers ────────────────────────────────────────────────────────── */
+const S={
+  app:{minHeight:"100vh",background:BG,color:TX},
+  nav:{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 18px",height:"52px",borderBottom:`1px solid ${BR}`,background:BG,position:"sticky",top:0,zIndex:50},
+  ov:{position:"fixed",inset:0,background:"rgba(0,0,0,.9)",display:"flex",alignItems:"center",justifyContent:"center",zIndex:200,padding:"16px"},
+  mo:(w=480)=>({background:SF,borderRadius:"18px",padding:"24px",width:"100%",maxWidth:`${w}px`,border:"1px solid #2a2a2a",maxHeight:"92vh",overflowY:"auto"}),
+  inp:{width:"100%",background:"#0f0f0f",border:"1px solid #2a2a2a",borderRadius:"9px",padding:"10px 14px",color:TX,fontSize:"14px",outline:"none",boxSizing:"border-box",marginTop:"5px"},
+  sel:{width:"100%",background:"#0f0f0f",border:"1px solid #2a2a2a",borderRadius:"9px",padding:"9px 12px",color:TX,fontSize:"13px",outline:"none",boxSizing:"border-box",marginTop:"5px",cursor:"pointer"},
+  ta:{width:"100%",background:"transparent",border:"none",color:TX,fontSize:"13px",outline:"none",boxSizing:"border-box",resize:"vertical",lineHeight:1.5,padding:0},
+  lbl:{color:"#666",fontSize:"10px",fontWeight:"700",letterSpacing:".1em"},
+  bp:bg=>({background:bg||TX,color:bg?"#fff":BG,border:"none",padding:"9px 18px",borderRadius:"9px",fontWeight:"700",cursor:"pointer",fontSize:"13px"}),
+  bs:{background:"transparent",color:SB,border:"1px solid #282828",padding:"9px 18px",borderRadius:"9px",fontWeight:"600",cursor:"pointer",fontSize:"12px"},
+  gh:{background:"none",border:"none",color:SB,cursor:"pointer",fontSize:"12px",padding:"3px 0"},
+  ib:d=>({background:d?"#1c0a0a":"#222",border:"none",color:d?"#f87171":"#888",borderRadius:"7px",padding:"6px 9px",cursor:"pointer",fontSize:"12px"}),
+};
+
+/* ── Mini-components ──────────────────────────────────────────────────────── */
+function Tag({color,bg,children}){return <span style={{fontSize:"10px",background:bg,color,padding:"2px 7px",borderRadius:"5px",fontWeight:"600"}}>{children}</span>;}
+function SRow({label,count,sel,dim,onClick}){
+  return<div onClick={onClick} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"6px 11px",margin:"0 4px 1px",borderRadius:"8px",cursor:"pointer",background:sel?"#252525":"transparent"}}>
+    <span style={{fontSize:"12px",fontWeight:sel?"700":"500",color:sel?TX:dim?"#484848":"#bbb",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:"135px"}}>{label}</span>
+    <span style={{fontSize:"10px",color:"#3a3a3a",background:"#181818",borderRadius:"4px",padding:"1px 6px",flexShrink:0}}>{count}</span>
+  </div>;
+}
+function Circ({pct,color="#818cf8",label,sub}){
+  const r=28,c=2*Math.PI*r,off=c-(pct/100)*c;
+  return<div style={{display:"flex",flexDirection:"column",alignItems:"center",gap:"4px"}}>
+    <svg width="72" height="72" viewBox="0 0 72 72">
+      <circle cx="36" cy="36" r={r} fill="none" stroke="#1a1a1a" strokeWidth="6"/>
+      <circle cx="36" cy="36" r={r} fill="none" stroke={color} strokeWidth="6" strokeDasharray={c} strokeDashoffset={off} strokeLinecap="round" transform="rotate(-90 36 36)"/>
+      <text x="36" y="36" textAnchor="middle" dominantBaseline="central" fill={TX} fontSize="13" fontWeight="800">{pct}%</text>
+    </svg>
+    {label&&<span style={{fontSize:"11px",color:TX,fontWeight:"700"}}>{label}</span>}
+    {sub&&<span style={{fontSize:"10px",color:MT}}>{sub}</span>}
+  </div>;
+}
+function Spin({msg="Cargando..."}){
+  return<div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:BG,gap:"16px"}}>
+    <div style={{width:"36px",height:"36px",border:"3px solid #222",borderTop:"3px solid #7c3aed",borderRadius:"50%",animation:"spin .8s linear infinite"}}/>
+    <span style={{color:MT,fontSize:"13px"}}>{msg}</span>
+  </div>;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════ */
+function App(){
+  /* auth */
+  const [screen,setScreen]=useState("boot");
+  const [user,setUser]=useState(null);
+  const [aMode,setAMode]=useState("login");
+  const [aUser,setAUser]=useState("");
+  const [aPin,setAPin]=useState("");
+  const [aPin2,setAPin2]=useState("");
+  const [aErr,setAErr]=useState("");
+  const [aLoad,setALoad]=useState(false);
+  /* api key */
+  const [apiKey,setApiKey]=useState("");
+  const [apiKeyInput,setApiKeyInput]=useState("");
+  const [showApiModal,setShowApiModal]=useState(false);
+  /* data */
+  const [view,setView]=useState("home");
+  const [decks,setDecks]=useState([]);
+  const [allCards,setAllCards]=useState({});
+  const [allTopics,setAllTopics]=useState({});
+  const [allSubs,setAllSubs]=useState({});
+  const [deckId,setDeckId]=useState(null);
+  const [scope,setScope]=useState({type:"all"});
+  const [expT,setExpT]=useState(new Set());
+  const [gProf,setGProf]=useState("general");
+  const [dProfs,setDProfs]=useState({});
+  const [dExams,setDExams]=useState({});
+  const [custom,setCustom]=useState({ease:2.5,npd:20,maxI:365});
+  /* study */
+  const [queue,setQueue]=useState([]);
+  const [qIdx,setQIdx]=useState(0);
+  const [flipped,setFlipped]=useState(false);
+  const [ans,setAns]=useState("");
+  const [stats,setStats]=useState({again:0,hard:0,good:0,easy:0});
+  const [evalL,setEvalL]=useState(false);
+  const [evalR,setEvalR]=useState(null);
+  /* modals */
+  const [modal,setModal]=useState(null);
+  const [ndN,setNdN]=useState(""); const [ndC,setNdC]=useState(0);
+  const [ntN,setNtN]=useState(""); const [nsN,setNsN]=useState(""); const [sP,setSP]=useState(null);
+  const [cf,setCf]=useState(""); const [cb,setCb]=useState("");
+  const [cfI,setCfI]=useState(null); const [cbI,setCbI]=useState(null);
+  const [cT,setCT]=useState(""); const [cS,setCS]=useState(""); const [editC,setEditC]=useState(null);
+  const [impTxt,setImpTxt]=useState(""); const [impT,setImpT]=useState(""); const [impS,setImpS]=useState("");
+  const [docTid,setDocTid]=useState(null); const [docN,setDocN]=useState(""); const [docM,setDocM]=useState(null);
+  const [examIn,setExamIn]=useState("");
+  const [dataLoaded,setDataLoaded]=useState(false);
+  const [saving,setSaving]=useState(false);
+
+  /* ── Boot ── */
+  useEffect(()=>{
+    const ak=ls.get(AK_KEY); if(ak)setApiKey(ak);
+    const ses=ls.get(SES_KEY);
+    if(ses?.username){
+      loadData(ses.username);
+      setUser(ses.username);
+      setScreen("app");
+    } else setScreen("auth");
+  },[]);
+
+  function loadData(u){
+    const d=ls.get(uKey(u));
+    if(d){
+      if(d.decks)setDecks(d.decks);
+      if(d.allCards)setAllCards(d.allCards);
+      if(d.allTopics)setAllTopics(d.allTopics);
+      if(d.allSubs)setAllSubs(d.allSubs);
+      if(d.gProf)setGProf(d.gProf);
+      if(d.dProfs)setDProfs(d.dProfs);
+      if(d.dExams)setDExams(d.dExams);
+      if(d.custom)setCustom(d.custom);
+    }
+    setDataLoaded(true);
+  }
+
+  const saveData=useCallback((u,d)=>{if(!u||!d)return;setSaving(true);ls.set(uKey(u),d);setSaving(false);},[]);
+
+  useEffect(()=>{
+    if(!dataLoaded||!user)return;
+    const t=setTimeout(()=>saveData(user,{decks,allCards,allTopics,allSubs,gProf,dProfs,dExams,custom}),600);
+    return()=>clearTimeout(t);
+  },[decks,allCards,allTopics,allSubs,gProf,dProfs,dExams,custom,user,dataLoaded]);
+
+  /* ── Auth ── */
+  function doRegister(){
+    const u=aUser.trim().toLowerCase().replace(/[^a-z0-9_]/g,"");
+    if(!u||u.length<3){setAErr("Mínimo 3 caracteres (letras/números/guiones bajos).");return;}
+    if(!aPin||aPin.length<4){setAErr("PIN de mínimo 4 dígitos.");return;}
+    if(aPin!==aPin2){setAErr("Los PINs no coinciden.");return;}
+    setALoad(true);setAErr("");
+    const accts=ls.get(ACCOUNTS_KEY)||{};
+    if(accts[u]){setAErr("Ese usuario ya existe.");setALoad(false);return;}
+    accts[u]={pin:hashPin(aPin),created:new Date().toISOString()};
+    ls.set(ACCOUNTS_KEY,accts);
+    ls.set(SES_KEY,{username:u});
+    setUser(u);setDataLoaded(true);setScreen("app");
+    setALoad(false);setAUser("");setAPin("");setAPin2("");
+  }
+  function doLogin(){
+    const u=aUser.trim().toLowerCase().replace(/[^a-z0-9_]/g,"");
+    if(!u||!aPin){setAErr("Completa todos los campos.");return;}
+    setALoad(true);setAErr("");
+    const accts=ls.get(ACCOUNTS_KEY)||{};
+    if(!accts[u]){setAErr("Usuario no encontrado.");setALoad(false);return;}
+    if(accts[u].pin!==hashPin(aPin)){setAErr("PIN incorrecto.");setALoad(false);return;}
+    ls.set(SES_KEY,{username:u});
+    loadData(u);
+    setUser(u);setScreen("app");
+    setALoad(false);setAUser("");setAPin("");
+  }
+  function doLogout(){
+    if(!confirm("¿Cerrar sesión?"))return;
+    ls.del(SES_KEY);
+    setUser(null);setDecks([]);setAllCards({});setAllTopics({});setAllSubs({});
+    setGProf("general");setDProfs({});setDExams({});setDataLoaded(false);
+    setView("home");setScreen("auth");setAUser("");setAPin("");setAErr("");
+  }
+  function saveApiKey(){
+    const k=apiKeyInput.trim();
+    if(!k.startsWith("sk-ant-")){alert("La API key debe empezar con 'sk-ant-'");return;}
+    ls.set(AK_KEY,k);setApiKey(k);setShowApiModal(false);setApiKeyInput("");
+  }
+
+  /* ── Derived ── */
+  const deck=decks.find(d=>d.id===deckId);
+  const dc=deck?DC[deck.colorIdx%DC.length]:"#7c3aed";
+  const topics=deckId?(allTopics[deckId]||[]):[];
+  const subs=deckId?(allSubs[deckId]||[]):[];
+  const dCards=deckId?(allCards[deckId]||[]):[];
+  const unass=dCards.filter(c=>!c.topicId&&!c.subtopicId);
+  const apId=deckId?(dProfs[deckId]||gProf):gProf;
+  const ap=apId==="custom"?{...PROF.custom,...custom}:PROF[apId]||PROF.general;
+  const exStr=deckId?dExams[deckId]:null;
+  const exP=exStr&&dCards.length?calcExam(dCards,exStr,ap):null;
+
+  function cFor(sc){
+    if(!sc||sc.type==="all")return dCards;
+    if(sc.type==="unassigned")return unass;
+    if(sc.type==="topic"){const sids=subs.filter(s=>s.topicId===sc.id).map(s=>s.id);return dCards.filter(c=>c.topicId===sc.id||sids.includes(c.subtopicId));}
+    if(sc.type==="subtopic")return dCards.filter(c=>c.subtopicId===sc.id);
+    return dCards;
+  }
+  const scoped=cFor(scope);
+  const tSubs=tId=>subs.filter(s=>s.topicId===tId);
+  const tCnt=tId=>{const sids=subs.filter(s=>s.topicId===tId).map(s=>s.id);return dCards.filter(c=>c.topicId===tId||sids.includes(c.subtopicId)).length;};
+  const sCnt=sId=>dCards.filter(c=>c.subtopicId===sId).length;
+  const dDue=id=>(allCards[id]||[]).filter(isDue).length;
+  const tLbl=c=>topics.find(t=>t.id===c.topicId)?.name;
+  const sLbl=c=>subs.find(s=>s.id===c.subtopicId)?.name;
+  const pc=parseTxt(impTxt).length;
+  const card=queue[qIdx];
+  const done=queue.length>0&&qIdx>=queue.length;
+  const prog=queue.length?Math.min(qIdx/queue.length,1):0;
+  const scName=scope.type==="all"?"Todas":scope.type==="unassigned"?"Sin asignar":scope.type==="topic"?topics.find(t=>t.id===scope.id)?.name:subs.find(s=>s.id===scope.id)?.name;
+
+  /* ── Study handlers ── */
+  function startStudy(sc){
+    const pool=cFor(sc||scope);const due=pool.filter(isDue);
+    let arr=[...(due.length?due:pool)].sort(()=>Math.random()-.5);
+    if(exP&&arr.length>exP.dt*2)arr=arr.slice(0,exP.dt*2);
+    setQueue(arr);setQIdx(0);setFlipped(false);setAns("");setEvalR(null);
+    setStats({again:0,hard:0,good:0,easy:0});setView("study");
+  }
+  function review(q){
+    if(!card)return;
+    const upd={...card,...sm2(card,q,ap)};
+    setAllCards(p=>({...p,[deckId]:(p[deckId]||[]).map(c=>c.id===card.id?upd:c)}));
+    const k=["again","hard","good","easy"][q];setStats(p=>({...p,[k]:p[k]+1}));
+    if(q===0)setQueue(p=>{const n=[...p];n.splice(Math.min(qIdx+3,n.length),0,upd);return n;});
+    setFlipped(false);setAns("");setEvalR(null);setQIdx(p=>p+1);
+  }
+  async function showAns(){
+    setFlipped(true);if(!card)return;
+    setEvalL(true);setEvalR(null);
+    const ha=ans.trim().length>0;
+    if(!ha){setEvalR({missed:`Respuesta correcta: ${card.back||"—"}`,didWell:"",suggestion:0});setEvalL(false);return;}
+    if(!apiKey){
+      const sN=ans.trim().toLowerCase(),cN=(card.back||"").trim().toLowerCase();
+      if(sN===cN){setEvalR({missed:"",didWell:"Respuesta exactamente correcta.",suggestion:3});}
+      else{const cw=cN.split(/\s+/).filter(w=>w.length>3),mw=cw.filter(w=>sN.includes(w)),sc=cw.length>0?mw.length/cw.length:0;
+        if(sc>.6)setEvalR({missed:"Faltaron detalles.",didWell:"Mencionaste los puntos principales.",suggestion:2});
+        else if(sc>.2)setEvalR({missed:`Respuesta incompleta. Correcta: ${card.back}`,didWell:"",suggestion:1});
+        else setEvalR({missed:`Incorrecto. Respuesta: ${card.back}`,didWell:"",suggestion:0});}
+      setEvalL(false);return;
+    }
+    try{
+      const res=await fetch("https://api.anthropic.com/v1/messages",{
+        method:"POST",
+        headers:{"Content-Type":"application/json","x-api-key":apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+        body:JSON.stringify({model:"claude-sonnet-4-5",max_tokens:250,messages:[{role:"user",content:`Evalúa la respuesta del estudiante. Devuelve SOLO JSON sin texto extra.
+
+P: ${card.front}
+Correcta: ${card.back}
+Estudiante: ${ans.trim()}
+
+Regla estricta: incorrecta=0, parcial=1, correcta=2, perfecta=3.
+{"missed":"","didWell":"","suggestion":0}`}]})
+      });
+      if(!res.ok)throw new Error(res.status);
+      const data=await res.json();
+      const raw=(data.content?.map(b=>b.text||"").join("")||"").trim();
+      const match=raw.match(/\{[\s\S]*?\}/);
+      if(!match)throw new Error("no json");
+      const parsed=JSON.parse(match[0]);
+      if(typeof parsed.suggestion!=="number")throw new Error("bad");
+      setEvalR(parsed);
+    }catch{
+      const sN=ans.trim().toLowerCase(),cN=(card.back||"").trim().toLowerCase();
+      if(sN===cN){setEvalR({missed:"",didWell:"Respuesta exactamente correcta.",suggestion:3});}
+      else{const cw=cN.split(/\s+/).filter(w=>w.length>3),mw=cw.filter(w=>sN.includes(w)),sc=cw.length>0?mw.length/cw.length:0;
+        if(sc>.6)setEvalR({missed:"Faltaron algunos detalles.",didWell:"Mencionaste los puntos principales.",suggestion:2});
+        else if(sc>.2)setEvalR({missed:`Incompleta. Correcta: ${card.back}`,didWell:"",suggestion:1});
+        else setEvalR({missed:`Incorrecto. Respuesta: ${card.back}`,didWell:"",suggestion:0});}
+    }
+    setEvalL(false);
+  }
+
+  /* ── CRUD ── */
+  function addDeck(){if(!ndN.trim())return;setDecks(p=>[...p,{id:uid(),name:ndN.trim(),colorIdx:ndC}]);setNdN("");setModal(null);}
+  function addTopic(){if(!ntN.trim())return;setAllTopics(p=>({...p,[deckId]:[...(p[deckId]||[]),{id:uid(),name:ntN.trim(),addedDate:new Date().toISOString()}]}));setNtN("");setModal(null);}
+  function addSub(){if(!nsN.trim()||!sP)return;setAllSubs(p=>({...p,[deckId]:[...(p[deckId]||[]),{id:uid(),topicId:sP,name:nsN.trim()}]}));setNsN("");setModal(null);}
+  function delT(tId){if(!confirm("¿Eliminar topic?"))return;setAllTopics(p=>({...p,[deckId]:(p[deckId]||[]).filter(t=>t.id!==tId)}));setAllSubs(p=>({...p,[deckId]:(p[deckId]||[]).filter(s=>s.topicId!==tId)}));setAllCards(p=>({...p,[deckId]:(p[deckId]||[]).map(c=>c.topicId===tId?{...c,topicId:null,subtopicId:null}:c)}));if(scope.id===tId)setScope({type:"all"});}
+  function delS(sId){if(!confirm("¿Eliminar subtopic?"))return;setAllSubs(p=>({...p,[deckId]:(p[deckId]||[]).filter(s=>s.id!==sId)}));setAllCards(p=>({...p,[deckId]:(p[deckId]||[]).map(c=>c.subtopicId===sId?{...c,subtopicId:null}:c)}));if(scope.id===sId)setScope({type:"all"});}
+  function openCard(c=null){setEditC(c);setCf(c?.front||"");setCb(c?.back||"");setCfI(c?.frontImg||null);setCbI(c?.backImg||null);const at=c?.topicId||(scope.type==="topic"?scope.id:scope.type==="subtopic"?subs.find(s=>s.id===scope.id)?.topicId||"":"");setCT(at);setCS(c?.subtopicId||(scope.type==="subtopic"?scope.id:""));setModal("card");}
+  function saveCard(){if(!cf.trim()&&!cfI)return;const base=editC||{id:uid(),interval:1,repetitions:0,easeFactor:ap.ease,dueDate:null};const nc={...base,front:cf.trim(),back:cb.trim(),frontImg:cfI,backImg:cbI,topicId:cT||null,subtopicId:cS||null};if(editC)setAllCards(p=>({...p,[deckId]:(p[deckId]||[]).map(x=>x.id===nc.id?nc:x)}));else setAllCards(p=>({...p,[deckId]:[...(p[deckId]||[]),nc]}));setModal(null);setEditC(null);}
+  function doImport(){const parsed=parseTxt(impTxt);if(!parsed.length)return;setAllCards(p=>({...p,[deckId]:[...(p[deckId]||[]),...parsed.map(c=>({id:uid(),front:c.front,back:c.back,frontImg:null,backImg:null,topicId:impT||null,subtopicId:impS||null,interval:1,repetitions:0,easeFactor:ap.ease,dueDate:null}))]}));setImpTxt("");setImpT("");setImpS("");setModal(null);}
+  async function hImg(e,side){const f=e.target.files?.[0];if(!f)return;const r=new FileReader();r.onload=async ev=>{const x=await compressImg(ev.target.result);side==="f"?setCfI(x):setCbI(x);};r.readAsDataURL(f);}
+  function toggleE(id){setExpT(p=>{const s=new Set(p);s.has(id)?s.delete(id):s.add(id);return s;});}
+  function saveDoc(){setAllTopics(p=>({...p,[deckId]:(p[deckId]||[]).map(t=>t.id===docTid?{...t,docName:docN,docMeta:docM,docDate:new Date().toISOString()}:t)}));setModal(null);setDocTid(null);setDocN("");setDocM(null);}
+  function saveExam(){if(!examIn||!deckId)return;setDExams(p=>({...p,[deckId]:examIn}));setModal(null);}
+
+  /* ── Shared nav component ── */
+  const Nav=({left,right})=>(
+    <nav style={S.nav}>
+      <div style={{minWidth:"80px"}}>{left}</div>
+      <div style={{fontWeight:"800",fontSize:"17px",letterSpacing:"-.4px",display:"flex",alignItems:"center",gap:"6px"}}>⚡ FlashAI</div>
+      <div style={{minWidth:"80px",display:"flex",justifyContent:"flex-end",alignItems:"center",gap:"6px"}}>
+        {right}
+        {/* API key indicator */}
+        <button onClick={()=>setShowApiModal(true)} title={apiKey?"API Key configurada":"Configurar API Key"} style={{background:apiKey?"#0a1a0a":"#1a0a0a",border:`1px solid ${apiKey?"#104a22":"#4a1010"}`,color:apiKey?"#4ade80":"#f87171",borderRadius:"8px",padding:"4px 8px",cursor:"pointer",fontSize:"10px",fontWeight:"700"}}>
+          {apiKey?"🤖 IA ✓":"🤖 IA"}
+        </button>
+        <div onClick={()=>setModal("userM")} style={{width:"28px",height:"28px",borderRadius:"50%",background:"#7c3aed",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"12px",fontWeight:"800",color:"#fff",cursor:"pointer",flexShrink:0}}>
+          {user?.[0]?.toUpperCase()||"U"}
+        </div>
+      </div>
+    </nav>
+  );
+
+  /* ── User menu modal ── */
+  const UserMenu=()=>modal==="userM"?(
+    <div style={S.ov} onClick={e=>e.target===e.currentTarget&&setModal(null)}>
+      <div style={S.mo(300)}>
+        <div style={{display:"flex",alignItems:"center",gap:"12px",marginBottom:"18px"}}>
+          <div style={{width:"46px",height:"46px",borderRadius:"50%",background:"#7c3aed",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"18px",fontWeight:"900",color:"#fff"}}>{user?.[0]?.toUpperCase()}</div>
+          <div><div style={{fontWeight:"700",fontSize:"15px"}}>{user}</div><div style={{fontSize:"11px",color:MT}}>{decks.length} mazo{decks.length!==1?"s":""} · {Object.values(allCards).flat().length} tarjetas</div></div>
+        </div>
+        {saving&&<div style={{fontSize:"11px",color:"#4ade80",marginBottom:"10px"}}>● Guardando...</div>}
+        <div style={{fontSize:"11px",color:"#3a3a3a",background:"#111",borderRadius:"8px",padding:"10px 12px",marginBottom:"14px",lineHeight:1.6}}>
+          Los datos se guardan en este navegador. Para acceder desde otro dispositivo, exporta tus mazos o usa el mismo navegador.
+        </div>
+        <button onClick={()=>{setModal(null);doLogout();}} style={{...S.bp("#dc2626"),width:"100%",padding:"11px"}}>Cerrar sesión</button>
+        <button onClick={()=>setModal(null)} style={{...S.bs,width:"100%",marginTop:"8px",padding:"11px"}}>Cancelar</button>
+      </div>
+    </div>
+  ):null;
+
+  /* ── API Key Modal ── */
+  const ApiKeyModal=()=>showApiModal?(
+    <div style={S.ov} onClick={e=>e.target===e.currentTarget&&setShowApiModal(false)}>
+      <div style={S.mo(460)}>
+        <h2 style={{margin:"0 0 6px",fontSize:"17px",fontWeight:"800"}}>🤖 Configurar IA</h2>
+        <p style={{color:MT,fontSize:"12px",margin:"0 0 16px",lineHeight:1.6}}>
+          FlashAI usa la API de Claude (Anthropic) para evaluar tus respuestas inteligentemente.
+          La key se guarda solo en <b style={{color:TX}}>tu navegador</b> y se envía directamente a Anthropic — no pasa por ningún servidor nuestro.
+        </p>
+        {apiKey&&<div style={{background:"#081a0e",border:"1px solid #104a22",borderRadius:"10px",padding:"10px 14px",marginBottom:"14px",fontSize:"12px",color:"#4ade80"}}>✓ API Key configurada: {apiKey.slice(0,12)}…{apiKey.slice(-4)}</div>}
+        <div style={S.lbl}>TU API KEY DE ANTHROPIC</div>
+        <input style={S.inp} type="password" placeholder="sk-ant-api03-..." value={apiKeyInput} onChange={e=>setApiKeyInput(e.target.value)}/>
+        <div style={{fontSize:"11px",color:"#3a3a3a",marginTop:"8px",lineHeight:1.6}}>
+          Obtén tu key gratis en{" "}
+          <a href="https://console.anthropic.com" target="_blank" rel="noopener" style={{color:"#818cf8"}}>console.anthropic.com</a>.
+          Los primeros $5 USD son gratis al registrarte.
+        </div>
+        <div style={{display:"flex",gap:"8px",marginTop:"18px",justifyContent:"flex-end"}}>
+          {apiKey&&<button style={{...S.bs,color:"#f87171",borderColor:"#4a1010"}} onClick={()=>{ls.del(AK_KEY);setApiKey("");setShowApiModal(false);}}>Eliminar key</button>}
+          <button style={S.bs} onClick={()=>setShowApiModal(false)}>Cancelar</button>
+          <button style={S.bp("#818cf8")} onClick={saveApiKey}>Guardar</button>
+        </div>
+      </div>
+    </div>
+  ):null;
+
+  /* ════════════════════════════════════════════════════════════════════════ */
+  /* ── BOOT ── */
+  if(screen==="boot")return <Spin msg="Iniciando FlashAI..."/>;
+
+  /* ── AUTH ── */
+  if(screen==="auth")return(
+    <div style={{...S.app,display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",padding:"20px"}}>
+      <div style={{width:"100%",maxWidth:"380px",animation:"fadein .3s ease"}}>
+        <div style={{textAlign:"center",marginBottom:"32px"}}>
+          <div style={{fontSize:"48px",marginBottom:"8px"}}>⚡</div>
+          <h1 style={{margin:0,fontSize:"28px",fontWeight:"900",letterSpacing:"-.5px"}}>FlashAI</h1>
+          <p style={{color:MT,fontSize:"13px",margin:"6px 0 0"}}>Repaso espaciado con inteligencia artificial</p>
+        </div>
+        <div style={{display:"flex",background:"#141414",borderRadius:"12px",padding:"4px",marginBottom:"22px",border:"1px solid #222"}}>
+          {[["login","Iniciar sesión"],["register","Crear cuenta"]].map(([m,l])=>(
+            <button key={m} onClick={()=>{setAMode(m);setAErr("");}} style={{flex:1,background:aMode===m?"#252525":"transparent",color:aMode===m?TX:MT,border:"none",borderRadius:"9px",padding:"9px",fontSize:"13px",fontWeight:aMode===m?"700":"500",cursor:"pointer",transition:"all .15s"}}>{l}</button>
+          ))}
+        </div>
+        <div style={{background:SF,borderRadius:"18px",padding:"24px",border:"1px solid #242424"}}>
+          <div style={S.lbl}>USUARIO</div>
+          <input style={S.inp} placeholder="ej: nosair123" value={aUser} onChange={e=>setAUser(e.target.value.toLowerCase())} onKeyDown={e=>e.key==="Enter"&&(aMode==="register"?doRegister():doLogin())}/>
+          <div style={{...S.lbl,marginTop:"16px"}}>PIN (mínimo 4 dígitos)</div>
+          <input style={S.inp} type="password" inputMode="numeric" placeholder="••••" value={aPin} onChange={e=>setAPin(e.target.value)} onKeyDown={e=>e.key==="Enter"&&(aMode==="register"?doRegister():doLogin())}/>
+          {aMode==="register"&&<>
+            <div style={{...S.lbl,marginTop:"16px"}}>CONFIRMAR PIN</div>
+            <input style={S.inp} type="password" inputMode="numeric" placeholder="••••" value={aPin2} onChange={e=>setAPin2(e.target.value)} onKeyDown={e=>e.key==="Enter"&&doRegister()}/>
+          </>}
+          {aErr&&<div style={{background:"#1a0808",border:"1px solid #4a1010",borderRadius:"10px",padding:"10px 14px",marginTop:"14px",fontSize:"12px",color:"#fca5a5"}}>{aErr}</div>}
+          <button onClick={aMode==="register"?doRegister:doLogin} disabled={aLoad} style={{...S.bp("#7c3aed"),width:"100%",marginTop:"20px",padding:"13px",fontSize:"14px",opacity:aLoad?.6:1,display:"flex",alignItems:"center",justifyContent:"center",gap:"8px"}}>
+            {aLoad&&<div style={{width:"14px",height:"14px",border:"2px solid rgba(255,255,255,.3)",borderTop:"2px solid #fff",borderRadius:"50%",animation:"spin .8s linear infinite"}}/>}
+            {aLoad?"Procesando...":(aMode==="register"?"Crear cuenta":"Entrar")}
+          </button>
+        </div>
+        <p style={{textAlign:"center",color:"#333",fontSize:"11px",marginTop:"16px",lineHeight:1.7}}>
+          Los datos se guardan en tu navegador.<br/>
+          Sin registro de email ni contraseña real — solo usuario + PIN.
+        </p>
+      </div>
+    </div>
+  );
+
+  /* ════════════════════════════════════════════════════════════════════════ */
+  /* ── HOME ── */
+  if(view==="home")return(
+    <div style={S.app}>
+      <Nav right={<button style={{...S.bs,padding:"5px 9px",fontSize:"11px"}} onClick={()=>setModal("gprof")}>{PROF[gProf]?.icon} Perfil</button>}/>
+      <div style={{padding:"22px 18px",maxWidth:"880px",margin:"0 auto"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"20px"}}>
+          <div>
+            <h1 style={{margin:0,fontSize:"20px",fontWeight:"800"}}>Mis mazos</h1>
+            <div style={{fontSize:"11px",color:MT,marginTop:"2px"}}>Hola, <span style={{color:"#a78bfa",fontWeight:"700"}}>{user}</span> 👋</div>
+          </div>
+          <button style={S.bp()} onClick={()=>setModal("nd")}>+ Nuevo mazo</button>
+        </div>
+        {!apiKey&&<div style={{background:"#0d0d17",border:"1px solid #2a2a4a",borderRadius:"12px",padding:"12px 16px",marginBottom:"18px",display:"flex",alignItems:"center",gap:"12px",flexWrap:"wrap"}}>
+          <span style={{fontSize:"13px",color:"#818cf8"}}>🤖 Para evaluación IA activa, configura tu API key de Anthropic</span>
+          <button style={{...S.bp("#818cf8"),padding:"7px 14px",fontSize:"11px",flexShrink:0}} onClick={()=>setShowApiModal(true)}>Configurar</button>
+        </div>}
+        {decks.length===0?(
+          <div style={{textAlign:"center",color:MT,padding:"70px 0"}}>
+            <div style={{fontSize:"44px",marginBottom:"12px"}}>🃏</div>
+            <p style={{fontSize:"14px",margin:"0 0 6px"}}>Sin mazos aún</p>
+            <p style={{fontSize:"12px",margin:"0 0 20px",color:"#3a3a3a"}}>Crea tu primer mazo y empieza a estudiar</p>
+            <button style={S.bp()} onClick={()=>setModal("nd")}>Crear primer mazo</button>
+          </div>
+        ):(
+          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(240px,1fr))",gap:"12px"}}>
+            {decks.map(d=>{
+              const col=DC[d.colorIdx%DC.length];
+              const tot=(allCards[d.id]||[]).length,due=dDue(d.id);
+              const tc=(allTopics[d.id]||[]).length;
+              const pid=dProfs[d.id]||gProf,pr=PROF[pid]||PROF.general;
+              const ex=dExams[d.id];
+              const exD=ex?Math.max(0,Math.ceil((new Date(ex)-new Date())/86400000)):null;
+              return(
+                <div key={d.id} style={{background:col,borderRadius:"16px",padding:"18px",cursor:"pointer",minHeight:"120px",display:"flex",flexDirection:"column",justifyContent:"space-between",position:"relative",overflow:"hidden"}}
+                  onClick={()=>{setDeckId(d.id);setScope({type:"all"});setView("deck");}}>
+                  <div style={{position:"absolute",right:"-16px",top:"-16px",width:"80px",height:"80px",borderRadius:"50%",background:"rgba(255,255,255,.08)"}}/>
+                  <div>
+                    <div style={{fontWeight:"800",fontSize:"17px",color:"#fff"}}>{d.name}</div>
+                    <div style={{fontSize:"11px",color:"rgba(255,255,255,.6)",marginTop:"4px"}}>{tot} tarjeta{tot!==1?"s":""} · {due>0?<span style={{color:"#fde68a"}}>{due} pendientes</span>:<span>Al día ✓</span>}</div>
+                    <div style={{display:"flex",gap:"5px",marginTop:"5px",flexWrap:"wrap"}}>
+                      <span style={{fontSize:"10px",color:"rgba(255,255,255,.45)",background:"rgba(0,0,0,.2)",padding:"1px 7px",borderRadius:"5px"}}>{pr.icon} {pr.name}</span>
+                      {tc>0&&<span style={{fontSize:"10px",color:"rgba(255,255,255,.35)",background:"rgba(0,0,0,.15)",padding:"1px 7px",borderRadius:"5px"}}>{tc} topics</span>}
+                      {exD!==null&&<span style={{fontSize:"10px",color:exD<=3?"#fca5a5":exD<=7?"#fde68a":"#86efac",background:"rgba(0,0,0,.25)",padding:"1px 7px",borderRadius:"5px"}}>📅 {exD}d</span>}
+                    </div>
+                  </div>
+                  <div style={{display:"flex",gap:"6px",marginTop:"14px"}}>
+                    <button style={{background:"rgba(0,0,0,.3)",color:"#fff",border:"none",borderRadius:"8px",padding:"7px 13px",fontWeight:"700",cursor:"pointer",fontSize:"11px"}}
+                      onClick={e=>{e.stopPropagation();if(tot>0){setDeckId(d.id);setScope({type:"all"});setTimeout(()=>startStudy({type:"all"}),0);}}} >▶ Estudiar</button>
+                    <button style={{background:"rgba(0,0,0,.2)",color:"rgba(255,255,255,.6)",border:"none",borderRadius:"8px",padding:"7px 9px",cursor:"pointer",fontSize:"11px"}}
+                      onClick={e=>{e.stopPropagation();if(confirm(`¿Eliminar "${d.name}"?`))setDecks(p=>p.filter(x=>x.id!==d.id));}}>🗑</button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+      <UserMenu/><ApiKeyModal/>
+      {/* Global profiles */}
+      {modal==="gprof"&&<div style={S.ov} onClick={e=>e.target===e.currentTarget&&setModal(null)}>
+        <div style={S.mo(480)}>
+          <h2 style={{margin:"0 0 4px",fontSize:"18px",fontWeight:"800"}}>Perfiles de aprendizaje</h2>
+          <p style={{color:MT,fontSize:"11px",margin:"0 0 14px"}}>Elige el perfil global para todos tus mazos</p>
+          {Object.values(PROF).map(p=>(
+            <div key={p.id} onClick={()=>setGProf(p.id)} style={{display:"flex",gap:"12px",alignItems:"flex-start",padding:"12px 13px",borderRadius:"12px",cursor:"pointer",background:gProf===p.id?"#1e1e1e":"transparent",border:gProf===p.id?`1px solid ${p.col}44`:"1px solid transparent",marginBottom:"3px"}}>
+              <span style={{fontSize:"22px",flexShrink:0}}>{p.icon}</span>
+              <div style={{flex:1}}>
+                <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:"14px",fontWeight:"700"}}>{p.name}</span>{gProf===p.id&&<span style={{fontSize:"11px",color:p.col,fontWeight:"700"}}>✓ Activo</span>}</div>
+                <div style={{fontSize:"12px",color:MT,marginTop:"3px",lineHeight:1.4}}>{p.desc}</div>
+                {p.id!=="custom"&&<div style={{display:"flex",gap:"10px",marginTop:"5px"}}><span style={{fontSize:"10px",color:"#4a4a4a"}}>{p.npd} nuevas/día</span><span style={{fontSize:"10px",color:"#4a4a4a"}}>EF {p.ease}</span></div>}
+              </div>
+            </div>
+          ))}
+          {gProf==="custom"&&<div style={{background:"#111",borderRadius:"12px",padding:"14px",marginTop:"10px",display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"10px"}}>
+            <div><div style={S.lbl}>FACILIDAD</div><input type="number" style={S.inp} step=".1" min="1.3" max="3" value={custom.ease} onChange={e=>setCustom(p=>({...p,ease:+e.target.value}))}/></div>
+            <div><div style={S.lbl}>NUEVAS/DÍA</div><input type="number" style={S.inp} min="1" max="200" value={custom.npd} onChange={e=>setCustom(p=>({...p,npd:+e.target.value}))}/></div>
+            <div><div style={S.lbl}>MÁX INT.</div><input type="number" style={S.inp} min="1" max="3650" value={custom.maxI} onChange={e=>setCustom(p=>({...p,maxI:+e.target.value}))}/></div>
+          </div>}
+          <div style={{display:"flex",justifyContent:"flex-end",marginTop:"16px"}}><button style={S.bp(PROF[gProf]?.col||"#818cf8")} onClick={()=>setModal(null)}>Aplicar</button></div>
+        </div>
+      </div>}
+      {modal==="nd"&&<div style={S.ov} onClick={e=>e.target===e.currentTarget&&setModal(null)}>
+        <div style={S.mo()}>
+          <h2 style={{margin:"0 0 18px",fontSize:"18px",fontWeight:"800"}}>Nuevo mazo</h2>
+          <div style={S.lbl}>NOMBRE</div>
+          <input style={S.inp} autoFocus placeholder="Ej: Ginecología..." value={ndN} onChange={e=>setNdN(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addDeck()}/>
+          <div style={{...S.lbl,marginTop:"16px"}}>COLOR</div>
+          <div style={{display:"flex",gap:"8px",marginTop:"8px",flexWrap:"wrap"}}>{DC.map((c,i)=><div key={i} onClick={()=>setNdC(i)} style={{width:"30px",height:"30px",borderRadius:"50%",background:c,cursor:"pointer",border:ndC===i?"3px solid #fff":"3px solid transparent",boxSizing:"border-box"}}/>)}</div>
+          <div style={{display:"flex",gap:"8px",marginTop:"20px",justifyContent:"flex-end"}}>
+            <button style={S.bs} onClick={()=>setModal(null)}>Cancelar</button>
+            <button style={S.bp(DC[ndC])} onClick={addDeck}>Crear</button>
+          </div>
+        </div>
+      </div>}
+    </div>
+  );
+
+  /* ── DECK ── */
+  if(view==="deck")return(
+    <div style={S.app}>
+      <Nav left={<button style={S.gh} onClick={()=>setView("home")}>← Mazos</button>}
+        right={<div style={{display:"flex",gap:"4px"}}>
+          <button style={{...S.bs,padding:"5px 8px",fontSize:"11px"}} onClick={()=>setModal("dprof")}>{(PROF[apId]||PROF.general).icon}</button>
+          <button style={{...S.bs,padding:"5px 8px",fontSize:"11px"}} onClick={()=>{setImpTxt("");setImpT("");setImpS("");setModal("imp");}}>↑</button>
+          <button style={{...S.bp(dc),padding:"5px 8px",fontSize:"11px"}} onClick={()=>openCard()}>+</button>
+        </div>}
+      />
+      {exP&&<div style={{background:"#0d1117",borderBottom:"1px solid #1f2937",padding:"10px 18px",display:"flex",alignItems:"center",gap:"12px",flexWrap:"wrap"}}>
+        <div style={{flex:1,minWidth:"170px"}}>
+          <div style={{fontSize:"11px",color:"#818cf8",fontWeight:"700",marginBottom:"4px"}}>📅 Examen: {fmt(exStr)} — {exP.dL} días</div>
+          <div style={{background:"#1a1a2e",borderRadius:"6px",height:"5px",overflow:"hidden"}}><div style={{height:"100%",background:"#818cf8",width:`${exP.pct}%`,transition:"width .8s"}}/></div>
+        </div>
+        <div style={{display:"flex",gap:"14px",fontSize:"11px",color:MT,flexShrink:0}}>
+          <span><b style={{color:TX}}>{exP.mst}</b>/{exP.tot}</span>
+          <span style={{color:"#4ade80"}}>{exP.pct}%</span>
+          <span style={{color:"#fbbf24"}}>{exP.dt}/día</span>
+        </div>
+        <button onClick={()=>{if(confirm("¿Quitar fecha?"))setDExams(p=>{const n={...p};delete n[deckId];return n;});}} style={{background:"none",border:"none",color:"#2e2e2e",cursor:"pointer",fontSize:"11px"}}>✕</button>
+      </div>}
+      {apId==="medschool"&&!exP&&<div style={{background:"#0a0d14",borderBottom:"1px solid #1a1f2e",padding:"7px 18px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <span style={{fontSize:"11px",color:"#818cf8"}}>🥼 Med School — Programa tu examen para optimizar los repasos</span>
+        <button style={{...S.bs,padding:"4px 10px",fontSize:"10px",borderColor:"#818cf833",color:"#818cf8"}} onClick={()=>{setExamIn("");setModal("exam");}}>+ Fecha</button>
+      </div>}
+      {saving&&<div style={{background:"#0a1a0a",padding:"4px 18px",fontSize:"10px",color:"#4ade80"}}>● Guardando...</div>}
+
+      <div style={{display:"flex",minHeight:"calc(100vh - 52px)"}}>
+        {/* Sidebar */}
+        <div style={{width:"205px",minWidth:"205px",borderRight:`1px solid ${BR}`,padding:"10px 0",background:SF,overflowY:"auto",flexShrink:0}}>
+          <SRow label="Todas las tarjetas" count={dCards.length} sel={scope.type==="all"} onClick={()=>setScope({type:"all"})}/>
+          {unass.length>0&&<SRow label="Sin asignar" count={unass.length} sel={scope.type==="unassigned"} dim onClick={()=>setScope({type:"unassigned"})}/>}
+          {topics.length>0&&<div style={{borderTop:`1px solid ${BR}`,margin:"8px"}}/>}
+          {topics.map(t=>{
+            const ts=tSubs(t.id),ex2=expT.has(t.id),sel=scope.type==="topic"&&scope.id===t.id;
+            return<div key={t.id}>
+              <div style={{display:"flex",alignItems:"center",gap:"3px",padding:"6px 10px 6px 8px",margin:"0 4px 1px",borderRadius:"8px",background:sel?"#252525":"transparent"}}>
+                <button onClick={()=>toggleE(t.id)} style={{background:"none",border:"none",color:ex2?"#666":"#333",cursor:"pointer",fontSize:"9px",padding:"0 2px",transform:ex2?"rotate(90deg)":"none",transition:"transform .15s",lineHeight:1,flexShrink:0}}>▶</button>
+                <span onClick={()=>setScope({type:"topic",id:t.id})} style={{flex:1,fontSize:"12px",fontWeight:sel?"700":"500",color:sel?TX:"#bbb",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",cursor:"pointer"}}>{t.name}</span>
+                {t.docName&&<span title={t.docName} style={{fontSize:"9px",color:"#3a3a3a",flexShrink:0}}>📄</span>}
+                <span style={{fontSize:"9px",color:"#393939",flexShrink:0}}>{tCnt(t.id)}</span>
+                <button onClick={e=>{e.stopPropagation();setDocTid(t.id);setDocN(t.docName||"");setDocM(t.docMeta||null);setModal("doc");}} style={{background:"none",border:"none",color:"#2e2e2e",cursor:"pointer",fontSize:"10px",padding:"0 1px",lineHeight:1,flexShrink:0}}>📎</button>
+                <button onClick={()=>{setSP(t.id);setNsN("");setModal("ns");}} style={{background:"none",border:"none",color:"#333",cursor:"pointer",fontSize:"12px",padding:"0 1px",fontWeight:"700",lineHeight:1,flexShrink:0}}>+</button>
+                <button onClick={()=>delT(t.id)} style={{background:"none",border:"none",color:"#2a2a2a",cursor:"pointer",fontSize:"12px",padding:"0 1px",lineHeight:1,flexShrink:0}}>×</button>
+              </div>
+              {ex2&&t.docName&&<div style={{padding:"3px 8px 3px 22px",margin:"0 4px",display:"flex",alignItems:"center",gap:"4px"}}><span style={{fontSize:"9px",color:"#3a3a3a"}}>📄</span><span style={{fontSize:"10px",color:"#3a3a3a",flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.docName}</span>{t.docDate&&<span style={{fontSize:"9px",color:"#2a2a2a",flexShrink:0}}>{new Date(t.docDate).toLocaleDateString("es-MX",{day:"2-digit",month:"short"})}</span>}</div>}
+              {ex2&&ts.map(s=>{const ss=scope.type==="subtopic"&&scope.id===s.id;return(
+                <div key={s.id} onClick={()=>setScope({type:"subtopic",id:s.id})} style={{display:"flex",alignItems:"center",gap:"3px",padding:"5px 10px 5px 24px",margin:"0 4px 1px",borderRadius:"8px",background:ss?"#252525":"transparent",cursor:"pointer"}}>
+                  <span style={{color:"#2e2e2e",fontSize:"9px",marginRight:"2px"}}>└</span>
+                  <span style={{flex:1,fontSize:"11px",color:ss?TX:"#888",fontWeight:ss?"600":"400",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{s.name}</span>
+                  <span style={{fontSize:"9px",color:"#393939"}}>{sCnt(s.id)}</span>
+                  <button onClick={e=>{e.stopPropagation();delS(s.id);}} style={{background:"none",border:"none",color:"#2a2a2a",cursor:"pointer",fontSize:"11px",padding:"0 1px"}}>×</button>
+                </div>
+              );})}
+            </div>;
+          })}
+          <div style={{padding:"8px"}}>
+            <button onClick={()=>{setNtN("");setModal("nt");}} style={{background:"none",border:"1px dashed #232323",color:"#3a3a3a",borderRadius:"8px",padding:"6px 10px",cursor:"pointer",fontSize:"11px",width:"100%"}}>+ Nuevo topic</button>
+          </div>
+        </div>
+        {/* Card list */}
+        <div style={{flex:1,padding:"14px 16px",overflowY:"auto",minWidth:0}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"12px"}}>
+            <div>
+              <div style={{fontSize:"14px",fontWeight:"700"}}>{scName||deck?.name}</div>
+              <div style={{fontSize:"11px",color:MT,marginTop:"2px"}}>{scoped.length} tarjeta{scoped.length!==1?"s":""} · <span style={{color:scoped.filter(isDue).length>0?"#f59e0b":"#4ade80"}}>{scoped.filter(isDue).length} pendientes</span></div>
+            </div>
+            {scoped.length>0&&<button style={{...S.bp(dc),fontSize:"11px",padding:"7px 14px"}} onClick={()=>startStudy(scope)}>▶ Estudiar</button>}
+          </div>
+          {scoped.length===0?(
+            <div style={{textAlign:"center",color:MT,padding:"50px 0"}}>
+              <div style={{fontSize:"34px",marginBottom:"10px"}}>📭</div>
+              <p style={{fontSize:"13px",margin:"0 0 16px"}}>Sin tarjetas aquí</p>
+              <button style={S.bs} onClick={()=>openCard()}>+ Añadir tarjeta</button>
+            </div>
+          ):(
+            <div style={{display:"flex",flexDirection:"column",gap:"7px"}}>
+              {scoped.map(c=>(
+                <div key={c.id} style={{background:CB,borderRadius:"12px",padding:"11px 13px",display:"flex",gap:"10px",alignItems:"flex-start",border:`1px solid ${BR}`}}>
+                  {(c.frontImg||c.backImg)&&<div style={{display:"flex",gap:"4px",flexShrink:0,alignSelf:"center"}}>{c.frontImg&&<img src={c.frontImg} alt="" style={{width:"40px",height:"40px",borderRadius:"6px",objectFit:"cover"}}/>}{c.backImg&&<img src={c.backImg} alt="" style={{width:"40px",height:"40px",borderRadius:"6px",objectFit:"cover",opacity:.6}}/>}</div>}
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:"13px",fontWeight:"600",marginBottom:"2px"}}>{c.front||<em style={{color:MT,fontWeight:400}}>Solo imagen</em>}</div>
+                    <div style={{fontSize:"12px",color:"#aaa"}}>{c.back||<em style={{color:MT,fontWeight:400}}>Solo imagen</em>}</div>
+                    <div style={{display:"flex",gap:"4px",marginTop:"5px",flexWrap:"wrap"}}>
+                      {c.topicId&&<Tag color="#a78bfa" bg="#1e1a2e">{tLbl(c)}</Tag>}
+                      {c.subtopicId&&<Tag color="#93c5fd" bg="#1a1e2e">{sLbl(c)}</Tag>}
+                      <Tag color={isDue(c)?"#f87171":"#4ade80"} bg={isDue(c)?"#1a0808":"#081a0e"}>{isDue(c)?"Pendiente":"Al día"}</Tag>
+                    </div>
+                  </div>
+                  <div style={{display:"flex",gap:"4px",flexShrink:0}}>
+                    <button style={S.ib(false)} onClick={()=>openCard(c)}>✏️</button>
+                    <button style={S.ib(true)} onClick={()=>{if(confirm("¿Eliminar?"))setAllCards(p=>({...p,[deckId]:(p[deckId]||[]).filter(x=>x.id!==c.id)}));}}>🗑</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+      <UserMenu/><ApiKeyModal/>
+      {/* Deck modals */}
+      {modal==="dprof"&&<div style={S.ov} onClick={e=>e.target===e.currentTarget&&setModal(null)}>
+        <div style={S.mo(460)}>
+          <h2 style={{margin:"0 0 4px",fontSize:"17px",fontWeight:"800"}}>Perfil de {deck?.name}</h2>
+          <p style={{color:MT,fontSize:"11px",margin:"0 0 12px"}}>Configura el algoritmo para este mazo</p>
+          {Object.values(PROF).map(p=>{const act=apId===p.id;return(
+            <div key={p.id} onClick={()=>setDProfs(pr=>({...pr,[deckId]:p.id}))} style={{display:"flex",gap:"10px",alignItems:"center",padding:"10px 12px",borderRadius:"10px",cursor:"pointer",background:act?"#1e1e1e":"transparent",border:act?`1px solid ${p.col}44`:"1px solid transparent",marginBottom:"3px"}}>
+              <span style={{fontSize:"20px"}}>{p.icon}</span>
+              <div style={{flex:1}}><div style={{fontSize:"13px",fontWeight:"700"}}>{p.name}{act&&<span style={{color:p.col,fontSize:"10px",marginLeft:"6px"}}>✓ Activo</span>}</div><div style={{fontSize:"11px",color:MT}}>{p.npd} nuevas/día · EF {p.ease}</div></div>
+            </div>
+          );})}
+          {apId==="medschool"&&<div style={{background:"#0d1117",borderRadius:"12px",padding:"14px",marginTop:"10px",border:"1px solid #1f2937"}}>
+            <div style={{fontSize:"12px",color:"#818cf8",fontWeight:"700",marginBottom:"10px"}}>🥼 Examen Med School</div>
+            {exP?<div style={{display:"flex",justifyContent:"space-around",alignItems:"center"}}>
+              <Circ pct={exP.pct} color="#818cf8" label={`${exP.mst}/${exP.tot}`} sub="dominadas"/>
+              <Circ pct={exP.conf} color="#4ade80" label={`${exP.dL}d`} sub="restantes"/>
+              <div style={{textAlign:"center"}}><div style={{fontSize:"26px",fontWeight:"900",color:"#fbbf24"}}>{exP.dt}</div><div style={{fontSize:"10px",color:MT}}>tarjetas/día</div></div>
+            </div>:<button style={{...S.bp("#818cf8"),width:"100%"}} onClick={()=>{setExamIn("");setModal("exam");}}>📅 Programar examen</button>}
+          </div>}
+          <div style={{display:"flex",justifyContent:"flex-end",marginTop:"14px"}}><button style={S.bp((PROF[apId]||PROF.general).col)} onClick={()=>setModal(null)}>Listo</button></div>
+        </div>
+      </div>}
+      {modal==="exam"&&<div style={S.ov} onClick={e=>e.target===e.currentTarget&&setModal(null)}>
+        <div style={S.mo(400)}>
+          <h2 style={{margin:"0 0 4px",fontSize:"17px",fontWeight:"800"}}>📅 Programar examen</h2>
+          <p style={{color:MT,fontSize:"11px",margin:"0 0 14px",lineHeight:1.5}}>El algoritmo distribuirá repasos diarios para ≥90% dominio el día del examen.</p>
+          <div style={S.lbl}>FECHA DEL EXAMEN</div>
+          <input type="date" style={S.inp} value={examIn} min={new Date().toISOString().slice(0,10)} onChange={e=>setExamIn(e.target.value)}/>
+          {examIn&&dCards.length>0&&(()=>{const pv=calcExam(dCards,examIn,ap);return(
+            <div style={{background:"#0d1117",borderRadius:"12px",padding:"14px",marginTop:"12px",border:"1px solid #1f2937",display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:"8px",textAlign:"center"}}>
+              <div><div style={{fontSize:"22px",fontWeight:"900",color:"#818cf8"}}>{pv.dL}</div><div style={{fontSize:"10px",color:MT}}>días</div></div>
+              <div><div style={{fontSize:"22px",fontWeight:"900",color:"#fbbf24"}}>{pv.dt}</div><div style={{fontSize:"10px",color:MT}}>tarjetas/día</div></div>
+              <div><div style={{fontSize:"22px",fontWeight:"900",color:"#4ade80"}}>{pv.tot}</div><div style={{fontSize:"10px",color:MT}}>total</div></div>
+            </div>
+          );})()||null}
+          <div style={{display:"flex",gap:"8px",marginTop:"16px",justifyContent:"flex-end"}}>
+            <button style={S.bs} onClick={()=>setModal(null)}>Cancelar</button>
+            <button style={{...S.bp("#818cf8"),opacity:examIn?1:.4}} onClick={saveExam}>Programar</button>
+          </div>
+        </div>
+      </div>}
+      {modal==="doc"&&<div style={S.ov} onClick={e=>e.target===e.currentTarget&&setModal(null)}>
+        <div style={S.mo(420)}>
+          <h2 style={{margin:"0 0 4px",fontSize:"17px",fontWeight:"800"}}>📎 Documento fuente</h2>
+          <p style={{color:MT,fontSize:"11px",margin:"0 0 14px"}}>Asocia el documento de <b style={{color:TX}}>{topics.find(t=>t.id===docTid)?.name}</b></p>
+          <div style={S.lbl}>NOMBRE</div>
+          <input style={S.inp} placeholder="Ej: Clase 3 Miomas.pdf" value={docN} onChange={e=>setDocN(e.target.value)}/>
+          <div style={{...S.lbl,marginTop:"12px"}}>ADJUNTAR ARCHIVO</div>
+          <input type="file" accept=".pdf,.docx,.txt,.pptx,.png,.jpg" style={{...S.inp,padding:"6px 10px",cursor:"pointer"}} onChange={e=>{const f=e.target.files?.[0];if(!f)return;if(!docN)setDocN(f.name);setDocM({name:f.name,size:f.size,type:f.type,added:new Date().toISOString()});}}/>
+          {docM&&<div style={{background:"#111",borderRadius:"8px",padding:"8px 12px",marginTop:"8px",fontSize:"11px",color:MT,display:"flex",gap:"8px",alignItems:"center"}}><span>📄</span><span style={{flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{docM.name}</span><span>{(docM.size/1024).toFixed(0)} KB</span><button onClick={()=>setDocM(null)} style={{background:"none",border:"none",color:"#444",cursor:"pointer",fontSize:"12px"}}>×</button></div>}
+          <div style={{display:"flex",gap:"8px",marginTop:"16px",justifyContent:"flex-end"}}>
+            <button style={S.bs} onClick={()=>setModal(null)}>Cancelar</button>
+            <button style={S.bp(dc)} onClick={saveDoc}>Guardar</button>
+          </div>
+        </div>
+      </div>}
+      {modal==="nt"&&<div style={S.ov} onClick={e=>e.target===e.currentTarget&&setModal(null)}><div style={S.mo(360)}><h2 style={{margin:"0 0 16px",fontSize:"17px",fontWeight:"800"}}>Nuevo topic</h2><div style={S.lbl}>NOMBRE</div><input style={S.inp} autoFocus placeholder="Ej: Anatomía Uterina..." value={ntN} onChange={e=>setNtN(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addTopic()}/><div style={{display:"flex",gap:"8px",marginTop:"18px",justifyContent:"flex-end"}}><button style={S.bs} onClick={()=>setModal(null)}>Cancelar</button><button style={S.bp(dc)} onClick={addTopic}>Crear</button></div></div></div>}
+      {modal==="ns"&&<div style={S.ov} onClick={e=>e.target===e.currentTarget&&setModal(null)}><div style={S.mo(360)}><h2 style={{margin:"0 0 4px",fontSize:"17px",fontWeight:"800"}}>Nuevo subtopic</h2><p style={{color:MT,fontSize:"11px",margin:"0 0 14px"}}>en: {topics.find(t=>t.id===sP)?.name}</p><div style={S.lbl}>NOMBRE</div><input style={S.inp} autoFocus placeholder="Ej: Miomas submucosos..." value={nsN} onChange={e=>setNsN(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addSub()}/><div style={{display:"flex",gap:"8px",marginTop:"18px",justifyContent:"flex-end"}}><button style={S.bs} onClick={()=>setModal(null)}>Cancelar</button><button style={S.bp(dc)} onClick={addSub}>Crear</button></div></div></div>}
+      {modal==="card"&&<div style={S.ov} onClick={e=>e.target===e.currentTarget&&setModal(null)}>
+        <div style={S.mo(500)}>
+          <h2 style={{margin:"0 0 16px",fontSize:"17px",fontWeight:"800"}}>{editC?"Editar tarjeta":"Nueva tarjeta"}</h2>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px",marginBottom:"12px"}}>
+            <div><div style={S.lbl}>TOPIC</div><select style={S.sel} value={cT} onChange={e=>{setCT(e.target.value);setCS("");}}><option value="">Sin topic</option>{topics.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select></div>
+            <div><div style={S.lbl}>SUBTOPIC</div><select style={{...S.sel,opacity:cT?1:.4}} value={cS} onChange={e=>setCS(e.target.value)} disabled={!cT}><option value="">Sin subtopic</option>{tSubs(cT).map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
+          </div>
+          <div style={{marginBottom:"9px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"5px"}}><span style={{...S.lbl,color:dc}}>▲ FRENTE</span><label style={{cursor:"pointer",fontSize:"10px",color:"#666",background:"#181818",padding:"3px 9px",borderRadius:"5px",border:"1px solid #282828"}}>🖼 {cfI?"Cambiar":"Foto"}<input type="file" accept="image/*" style={{display:"none"}} onChange={e=>hImg(e,"f")}/></label></div>
+            <div style={{background:"#0f0f0f",borderRadius:"10px",padding:"10px",border:"1px solid #252525"}}>
+              {cfI&&<div style={{position:"relative",display:"inline-block",marginBottom:"6px"}}><img src={cfI} alt="" style={{maxHeight:"75px",maxWidth:"100%",borderRadius:"7px",objectFit:"contain"}}/><button onClick={()=>setCfI(null)} style={{position:"absolute",top:"2px",right:"2px",background:"rgba(0,0,0,.8)",color:"#fff",border:"none",borderRadius:"50%",width:"16px",height:"16px",cursor:"pointer",fontSize:"9px",lineHeight:"16px",textAlign:"center",padding:0}}>×</button></div>}
+              <textarea style={{...S.ta,minHeight:"44px"}} placeholder="Pregunta..." value={cf} onChange={e=>setCf(e.target.value)}/>
+            </div>
+          </div>
+          <div>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"5px"}}><span style={{...S.lbl,color:"#4ade80"}}>▼ REVERSO</span><label style={{cursor:"pointer",fontSize:"10px",color:"#666",background:"#181818",padding:"3px 9px",borderRadius:"5px",border:"1px solid #282828"}}>🖼 {cbI?"Cambiar":"Foto"}<input type="file" accept="image/*" style={{display:"none"}} onChange={e=>hImg(e,"b")}/></label></div>
+            <div style={{background:"#0f0f0f",borderRadius:"10px",padding:"10px",border:"1px solid #252525"}}>
+              {cbI&&<div style={{position:"relative",display:"inline-block",marginBottom:"6px"}}><img src={cbI} alt="" style={{maxHeight:"75px",maxWidth:"100%",borderRadius:"7px",objectFit:"contain"}}/><button onClick={()=>setCbI(null)} style={{position:"absolute",top:"2px",right:"2px",background:"rgba(0,0,0,.8)",color:"#fff",border:"none",borderRadius:"50%",width:"16px",height:"16px",cursor:"pointer",fontSize:"9px",lineHeight:"16px",textAlign:"center",padding:0}}>×</button></div>}
+              <textarea style={{...S.ta,minHeight:"44px"}} placeholder="Respuesta..." value={cb} onChange={e=>setCb(e.target.value)}/>
+            </div>
+          </div>
+          <div style={{display:"flex",gap:"8px",marginTop:"14px",justifyContent:"flex-end"}}>
+            <button style={S.bs} onClick={()=>{setModal(null);setEditC(null);}}>Cancelar</button>
+            <button style={{...S.bp(dc),opacity:(!cf.trim()&&!cfI)?.4:1}} onClick={saveCard}>{editC?"Guardar":"Añadir"}</button>
+          </div>
+        </div>
+      </div>}
+      {modal==="imp"&&<div style={S.ov} onClick={e=>e.target===e.currentTarget&&setModal(null)}>
+        <div style={S.mo(500)}>
+          <h2 style={{margin:"0 0 4px",fontSize:"17px",fontWeight:"800"}}>Importar .txt</h2>
+          <p style={{color:MT,fontSize:"11px",margin:"0 0 10px"}}>Q:/A: · separado por ; | o tab</p>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px",marginBottom:"10px"}}>
+            <div><div style={S.lbl}>TOPIC</div><select style={S.sel} value={impT} onChange={e=>{setImpT(e.target.value);setImpS("");}}><option value="">Sin topic</option>{topics.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select></div>
+            <div><div style={S.lbl}>SUBTOPIC</div><select style={{...S.sel,opacity:impT?1:.4}} value={impS} onChange={e=>setImpS(e.target.value)} disabled={!impT}><option value="">Sin subtopic</option>{tSubs(impT).map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
+          </div>
+          <div style={S.lbl}>ARCHIVO .TXT</div>
+          <input type="file" accept=".txt,.csv" style={{...S.inp,padding:"6px 10px",cursor:"pointer"}} onChange={e=>{const f=e.target.files?.[0];if(f){const r=new FileReader();r.onload=ev=>setImpTxt(ev.target.result);r.readAsText(f,"UTF-8");}}}/>
+          <div style={{...S.lbl,marginTop:"10px"}}>O PEGAR TEXTO</div>
+          <textarea style={{...S.inp,marginTop:"5px",minHeight:"90px",resize:"vertical",fontFamily:"monospace",fontSize:"12px",lineHeight:1.6}} placeholder={"Q: ¿Qué son los miomas?\nA: Tumores benignos del músculo liso"} value={impTxt} onChange={e=>setImpTxt(e.target.value)}/>
+          <div style={{fontSize:"11px",marginTop:"5px",color:pc>0?"#4ade80":MT}}>{pc>0?`✓ ${pc} tarjeta${pc!==1?"s":""} detectada${pc!==1?"s":""}` :"Pega texto para previsualizar"}</div>
+          <div style={{display:"flex",gap:"8px",marginTop:"12px",justifyContent:"flex-end"}}>
+            <button style={S.bs} onClick={()=>setModal(null)}>Cancelar</button>
+            <button style={{...S.bp(dc),opacity:pc?1:.35}} onClick={doImport}>Importar{pc>0?` (${pc})`:""}</button>
+          </div>
+        </div>
+      </div>}
+    </div>
+  );
+
+  /* ── STUDY ── */
+  if(view==="study"){
+    if(queue.length===0)return<div style={S.app}><Nav left={<button style={S.gh} onClick={()=>setView("deck")}>← {deck?.name}</button>}/><div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"calc(100vh - 52px)",padding:"32px",textAlign:"center"}}><div style={{fontSize:"44px",marginBottom:"14px"}}>✅</div><h2 style={{fontSize:"21px",fontWeight:"800",margin:"0 0 6px"}}>Sin pendientes hoy</h2><p style={{color:MT,margin:"0 0 22px",fontSize:"13px"}}>Todas las tarjetas están al día</p><button style={S.bs} onClick={()=>setView("deck")}>Volver al mazo</button></div></div>;
+    if(done)return<div style={S.app}><Nav left={<button style={S.gh} onClick={()=>setView("deck")}>← {deck?.name}</button>}/><div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"calc(100vh - 52px)",padding:"32px",textAlign:"center"}}><div style={{fontSize:"52px",marginBottom:"16px"}}>🎉</div><h2 style={{fontSize:"24px",fontWeight:"900",margin:"0 0 5px"}}>¡Sesión completada!</h2><p style={{color:MT,margin:"0 0 22px",fontSize:"13px"}}>Revisaste {queue.length} tarjeta{queue.length!==1?"s":""}</p>{exP&&<div style={{background:"#0d1117",border:"1px solid #1f2937",borderRadius:"16px",padding:"16px 20px",marginBottom:"20px",width:"100%",maxWidth:"320px"}}><div style={{fontSize:"11px",color:"#818cf8",fontWeight:"700",marginBottom:"10px"}}>Progreso hacia el examen</div><div style={{display:"flex",justifyContent:"space-around"}}><Circ pct={exP.pct} color="#818cf8" label={`${exP.mst}/${exP.tot}`} sub="dominadas"/><Circ pct={exP.conf} color="#4ade80" label={`${exP.dL}d`} sub="restantes"/></div></div>}<div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:"8px",marginBottom:"22px",width:"100%",maxWidth:"360px"}}>{[["De nuevo",stats.again,"#ef4444"],["Difícil",stats.hard,"#f97316"],["Bien",stats.good,"#22c55e"],["Fácil",stats.easy,"#3b82f6"]].map(([l,n,c])=><div key={l} style={{background:CB,borderRadius:"11px",padding:"12px 5px"}}><div style={{fontSize:"22px",fontWeight:"900",color:c}}>{n}</div><div style={{fontSize:"10px",color:MT,marginTop:"3px"}}>{l}</div></div>)}</div><div style={{display:"flex",gap:"9px"}}><button style={S.bs} onClick={()=>setView("deck")}>Ver mazo</button><button style={S.bp(dc)} onClick={()=>startStudy(scope)}>Repetir</button></div></div></div>;
+
+    const BTNS=[{l:"De nuevo",q:0,bg:"#c0392b",acc:"#ff6b6b"},{l:"Difícil",q:1,bg:"#7d5a00",acc:"#ffc107"},{l:"Bien",q:2,bg:"#1a6b3a",acc:"#2ecc71"},{l:"Fácil",q:3,bg:"#0d4f8a",acc:"#3498db"}];
+    const sugI=evalR?.suggestion??null;
+    return(
+      <div style={S.app}>
+        <nav style={S.nav}>
+          <button style={S.gh} onClick={()=>setView("deck")}>← {deck?.name}</button>
+          <div style={{color:MT,fontSize:"12px",fontWeight:"600"}}>{qIdx+1} / {queue.length}</div>
+          <div style={{display:"flex",gap:"5px",fontSize:"11px"}}>
+            {[["Nuevas",scoped.filter(c=>!c.repetitions).length,"#3b82f6"],["Revisar",scoped.filter(c=>c.repetitions>0&&isDue(c)).length,"#f59e0b"],["Quedan",queue.length-qIdx,"#a78bfa"]].map(([l,n,c])=>(
+              <span key={l} style={{background:"#1a1a1a",padding:"2px 6px",borderRadius:"5px",color:c,fontWeight:"700"}}>{n} {l}</span>
+            ))}
+          </div>
+        </nav>
+        <div style={{height:"3px",background:"#1a1a1a"}}><div style={{height:"100%",background:dc,width:`${prog*100}%`,transition:"width .4s ease"}}/></div>
+        <div style={{maxWidth:"640px",margin:"0 auto",padding:"0 0 140px"}}>
+          {(card?.topicId||card?.subtopicId)&&<div style={{display:"flex",gap:"5px",padding:"10px 16px 0",flexWrap:"wrap"}}>{card.topicId&&<Tag color="#a78bfa" bg="#1e1a2e">{tLbl(card)}</Tag>}{card.subtopicId&&<Tag color="#93c5fd" bg="#1a1e2e">{sLbl(card)}</Tag>}</div>}
+          <div style={{margin:"10px 16px 0",background:CB,borderRadius:"16px",border:`1px solid ${BR}`,overflow:"hidden"}}>
+            {!card?.repetitions&&<div style={{padding:"10px 16px 0"}}><span style={{background:"#1d4ed8",color:"#bfdbfe",fontSize:"11px",fontWeight:"700",padding:"3px 10px",borderRadius:"6px"}}>Nueva</span></div>}
+            <div style={{padding:"14px 18px 16px"}}>{card?.frontImg&&<img src={card.frontImg} alt="" style={{maxWidth:"100%",maxHeight:"140px",borderRadius:"10px",objectFit:"contain",marginBottom:"10px",display:"block"}}/>}{card?.front&&<div style={{fontSize:"17px",fontWeight:"700",color:TX,lineHeight:1.45}}>{card.front}</div>}</div>
+            {flipped&&<><div style={{borderTop:`1px solid ${BR}`,height:"1px"}}/><div style={{padding:"14px 18px"}}>{card?.backImg&&<img src={card.backImg} alt="" style={{maxWidth:"100%",maxHeight:"140px",borderRadius:"10px",objectFit:"contain",marginBottom:"10px",display:"block"}}/>}{card?.back&&<div style={{fontSize:"15px",color:"#d1d5db",lineHeight:1.55}}>{card.back}</div>}</div></>}
+          </div>
+          {flipped&&<div style={{margin:"8px 16px 0"}}>{evalL&&<div style={{background:"#111827",border:"1px solid #1f2937",borderRadius:"12px",padding:"12px 14px",fontSize:"13px",color:"#6b7280"}}>✦ Analizando tu respuesta...</div>}{evalR&&<div style={{display:"flex",flexDirection:"column",gap:"7px"}}>{evalR.missed&&<div style={{background:"#1a0808",border:"1px solid #4a1010",borderRadius:"12px",padding:"11px 13px"}}><span style={{background:"#ef4444",color:"#fff",fontSize:"10px",fontWeight:"700",padding:"2px 8px",borderRadius:"5px"}}>✗ Lo que te faltó</span><div style={{fontSize:"13px",color:"#fca5a5",lineHeight:1.6,marginTop:"6px"}}>{evalR.missed}</div></div>}{evalR.didWell&&<div style={{background:"#081a0e",border:"1px solid #104a22",borderRadius:"12px",padding:"11px 13px"}}><span style={{background:"#22c55e",color:"#fff",fontSize:"10px",fontWeight:"700",padding:"2px 8px",borderRadius:"5px"}}>✓ Lo que hiciste bien</span><div style={{fontSize:"13px",color:"#86efac",lineHeight:1.6,marginTop:"6px"}}>{evalR.didWell}</div></div>}</div>}</div>}
+          {!flipped?<div style={{margin:"10px 16px 0"}}><div style={{background:"#101010",borderRadius:"14px",border:"1px solid #2a2a2a",overflow:"hidden"}}><textarea style={{...S.ta,padding:"13px 15px",minHeight:"78px",fontSize:"14px",display:"block"}} placeholder="Escribe tu respuesta aquí... (opcional)" value={ans} onChange={e=>setAns(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&(e.metaKey||e.ctrlKey))showAns();}}/><div style={{borderTop:"1px solid #1e1e1e",padding:"6px 13px",display:"flex",justifyContent:"space-between"}}><span style={{fontSize:"10px",color:"#2e2e2e"}}>Ctrl+↩ para revelar</span><span style={{fontSize:"10px",color:"#3a3a3a"}}>{ans.length>0?`${ans.length} car.`:"Puedes dejarlo vacío"}</span></div></div></div>
+            :(ans.trim()&&<div style={{margin:"8px 16px 0",background:"#0d0d10",border:"1px solid #1e1e2e",borderRadius:"12px",padding:"10px 13px"}}><div style={{fontSize:"10px",color:"#444",fontWeight:"700",letterSpacing:".08em",marginBottom:"4px"}}>TU RESPUESTA</div><div style={{fontSize:"13px",color:"#8b8b9e",lineHeight:1.5}}>{ans}</div></div>)}
+        </div>
+        <div style={{position:"fixed",bottom:0,left:0,right:0,background:"rgba(13,13,13,.97)",borderTop:`1px solid ${BR}`,padding:"10px 16px 20px",backdropFilter:"blur(12px)"}}>
+          {!flipped?<button onClick={showAns} style={{width:"100%",background:"#e91e63",color:"#fff",border:"none",borderRadius:"14px",padding:"15px",fontSize:"16px",fontWeight:"800",cursor:"pointer"}}>Mostrar respuesta ___</button>:(
+            <>
+              <div style={{textAlign:"center",fontSize:"11px",color:MT,marginBottom:"7px"}}>{evalL?<span style={{color:"#444"}}>✦ IA analizando...</span>:evalR?<span>IA sugiere: <b style={{color:TX}}>{LBLS[evalR.suggestion]}</b></span>:null}</div>
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px"}}>
+                {BTNS.map(({l,q,bg,acc})=>{const isSug=sugI===q&&evalR&&!evalL;return(
+                  <button key={q} onClick={()=>review(q)} style={{background:bg,color:"#fff",border:isSug?`2px solid ${acc}`:"2px solid transparent",borderRadius:"14px",padding:"12px 6px",fontWeight:"800",cursor:"pointer",fontSize:"14px",display:"flex",flexDirection:"column",alignItems:"center",gap:"3px",boxShadow:isSug?`0 0 12px ${acc}44`:"none",position:"relative"}}>
+                    {isSug&&<span style={{position:"absolute",top:"-8px",right:"8px",background:acc,color:"#000",fontSize:"8px",fontWeight:"900",padding:"2px 6px",borderRadius:"4px"}}>IA ★</span>}
+                    <span>{l}</span><span style={{fontSize:"10px",opacity:.65,fontWeight:"600"}}>{nxtL(card,q,ap)}</span>
+                  </button>
+                );})}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+  return null;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>
