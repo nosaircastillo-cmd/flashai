@@ -315,7 +315,15 @@ function App(){
     setGProf("general");setDProfs({});setDExams({});setDataLoaded(false);
     setView("home");setScreen("auth");setAUser("");setAPin("");setAErr("");
   }
-  const [testStatus,setTestStatus]=useState(null); // null | "testing" | "ok" | {err}
+  const [testStatus,setTestStatus]=useState(null); // null|"testing"|"ok"|{err}
+  function saveApiKey(){
+    const k=apiKeyInput.trim();
+    if(!k){alert("Pega tu API key primero.");return;}
+    if(apiProvider==="anthropic"&&!k.startsWith("sk-ant-")){alert("La key de Anthropic debe empezar con 'sk-ant-'");return;}
+    if(apiProvider==="gemini"&&!k.startsWith("AIza")){alert("La key de Gemini debe empezar con 'AIza'");return;}
+    ls.set(AK_KEY,k);ls.set(AK_PROV,apiProvider);
+    setApiKey(k);setShowApiModal(false);setApiKeyInput("");setTestStatus(null);
+  }
   async function testApiKey(){
     const k=(apiKeyInput.trim()||apiKey);
     if(!k){alert("Pega una API key primero.");return;}
@@ -345,13 +353,6 @@ function App(){
         else setTestStatus({err:d.error?.message||"Error de autenticación"});
       }
     }catch(e){setTestStatus({err:e.message||"Error de red / CORS"});}
-  }
-    const k=apiKeyInput.trim();
-    if(!k){alert("Pega tu API key primero.");return;}
-    if(apiProvider==="anthropic"&&!k.startsWith("sk-ant-")){alert("La key de Anthropic debe empezar con 'sk-ant-'");return;}
-    if(apiProvider==="gemini"&&!k.startsWith("AIza")){alert("La key de Gemini debe empezar con 'AIza'");return;}
-    ls.set(AK_KEY,k);ls.set(AK_PROV,apiProvider);
-    setApiKey(k);setShowApiModal(false);setApiKeyInput("");
   }
 
   /* ── Derived ── */
