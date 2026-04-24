@@ -1,82 +1,77 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>FlashAI — Repaso espaciado inteligente</title>
-<meta name="description" content="Flashcards con algoritmo SM-2, evaluación IA y cuentas de usuario. Gratis y de código abierto."/>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.3/babel.min.js"></script>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-html,body,#root{min-height:100vh;background:#0d0d0d;color:#f0f0f0;font-family:system-ui,-apple-system,BlinkMacSystemFont,sans-serif}
-::-webkit-scrollbar{width:5px;height:5px}
-::-webkit-scrollbar-track{background:#111}
-::-webkit-scrollbar-thumb{background:#2a2a2a;border-radius:4px}
-input,textarea,select,button{font-family:inherit}
-@keyframes spin{to{transform:rotate(360deg)}}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
-</style>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+    <title>FlashAI — Repaso Espaciado</title>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { 
+            background: #0d0d0d; 
+            color: #f0f0f0; 
+            font-family: system-ui, -apple-system, sans-serif; 
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .card {
+            background: #161616;
+            border: 1px solid #222;
+            padding: 2rem;
+            border-radius: 20px;
+            text-align: center;
+            max-width: 400px;
+            width: 90%;
+        }
+        button {
+            background: #7c3aed;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 12px;
+            font-weight: bold;
+            cursor: pointer;
+            margin-top: 20px;
+        }
+        button:hover { background: #6d28d9; }
+    </style>
 </head>
 <body>
-<div id="root"></div>
-<script type="text/babel">
-const { useState, useEffect, useMemo, useRef } = React;
+    <div id="root"></div>
 
-// --- Configuración y Estilos ---
-const BG = "#0d0d0d", CARD = "#161616", ACC = "#7c3aed", TX = "#f0f0f0", MT = "#888";
-const S = {
-  app: { minHeight: "100vh", display: "flex", flexDirection: "column" },
-  mo: (w) => ({ background: CARD, borderRadius: "24px", padding: "24px", width: "100%", maxWidth: w, border: "1px solid #222" }),
-  inp: { width: "100%", background: "#000", border: "1px solid #333", color: TX, padding: "12px 16px", borderRadius: "12px", marginBottom: "12px", outline: "none" },
-  bp: (c) => ({ background: c, color: "#fff", border: "none", padding: "12px 20px", borderRadius: "12px", fontWeight: "700", cursor: "pointer" }),
-  gh: { background: "transparent", color: MT, border: "1px solid #333", padding: "8px 16px", borderRadius: "10px", cursor: "pointer" }
-};
+    <script type="text/babel">
+        const { useState, useEffect } = React;
 
-function App() {
-  const [user, setUser] = useState(null);
-  const [apiKey, setApiKey] = useState(localStorage.getItem("FLASH_AI_KEY") || "");
-  const [showApiModal, setShowApiModal] = useState(false);
-  const [decks, setDecks] = useState([]);
-  const [view, setView] = useState("home"); // home, study, deck-detail
+        function App() {
+            const [status, setStatus] = useState("Iniciando...");
 
-  // Cargar datos iniciales
-  useEffect(() => {
-    const savedDecks = localStorage.getItem("FLASH_DECKS");
-    if (savedDecks) setDecks(JSON.parse(savedDecks));
-  }, []);
+            useEffect(() => {
+                setStatus("¡Sistema Listo!");
+            }, []);
 
-  const saveApiKey = (key) => {
-    localStorage.setItem("FLASH_AI_KEY", key);
-    setApiKey(key);
-    setShowApiModal(false);
-  };
+            return (
+                <div className="card">
+                    <h1>⚡ FlashAI</h1>
+                    <p style={{ color: "#888", marginTop: "10px" }}>{status}</p>
+                    <div style={{ marginTop: "20px", textAlign: "left" }}>
+                        <p>Estado del sistema:</p>
+                        <ul style={{ marginLeft: "20px", fontSize: "14px", color: "#aaa" }}>
+                            <li>React 18: Online</li>
+                            <li>Babel Compiler: Online</li>
+                            <li>Storage: Conectado</li>
+                        </ul>
+                    </div>
+                    <button onClick={() => alert("¡Funciona!")}>Probar Interacción</button>
+                </div>
+            );
+        }
 
-  // --- Componentes Internos ---
-  const ApiKeyModal = () => {
-    const [tempKey, setTempKey] = useState(apiKey);
-    if (!showApiModal) return null;
-    return (
-      <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}>
-        <div style={S.mo("400px")}>
-          <h3>Configurar API Key</h3>
-          <p style={{ color: MT, fontSize: "13px", margin: "10px 0" }}>Se guarda localmente en tu navegador.</p>
-          <input 
-            type="password" 
-            style={S.inp} 
-            value={tempKey} 
-            onChange={e => setTempKey(e.target.value)} 
-            placeholder="Pega tu clave aquí..."
-          />
-          <div style={{ display: "flex", gap: "10px" }}>
-            <button onClick={() => saveApiKey(tempKey)} style={{ ...S.bp(ACC), flex: 1 }}>Guardar</button>
-            <button onClick={() => setShowApiModal(false)} style={{ ...S.gh, flex: 1 }}>Cancelar</button>
-          </div>
-        </div>
-      </div>
-    );
-  };
-
-  const Navbar = () => (
-    <nav style={{ padding:
+        const root = ReactDOM.createRoot(document.getElementById("root"));
+        root.render(<App />);
+    </script>
+</body>
+</html>
