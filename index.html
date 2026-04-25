@@ -330,23 +330,27 @@ function App(){
     setTestStatus("testing");
     try{
       if(apiProvider==="gemini"){
-        // Get available models first
         const listRes=await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${k}`);
         const listData=await listRes.json();
         if(listData.error)throw new Error(listData.error.message||listData.error.status);
-        const supported=listData.models
+        const order=["gemini-2.0-flash-lite","gemini-2.0-flash","gemini-2.5-flash","gemini-1.5-flash"];
+        const available=listData.models
           ?.filter(m=>m.supportedGenerationMethods?.includes("generateContent"))
-          ?.filter(m=>m.name.includes("gemini"))
           ?.map(m=>m.name.replace("models/",""))||[];
-        if(supported.length===0)throw new Error("No se encontraron modelos disponibles para esta key.");
-        // Test with first available model
-        const model=supported[0];
+        const model=order.find(m=>available.includes(m))||available.find(m=>m.includes("gemini"));
+        if(!model)throw new Error("No se encontraron modelos disponibles.");
+        // Cache the working model
+        ls.set("fai_gemini_model",model);
         const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${k}`,{
           method:"POST",headers:{"Content-Type":"application/json"},
           body:JSON.stringify({contents:[{parts:[{text:"Responde solo: OK"}]}],generationConfig:{maxOutputTokens:5}})
         });
         const d=await res.json();
-        if(d.error)throw new Error(d.error.message);
+        if(d.error){
+          if(d.error.message?.includes("quota")||d.error.message?.includes("RESOURCE_EXHAUSTED"))
+            throw new Error("Límite de uso alcanzado. Espera 1 minuto.");
+          throw new Error(d.error.message);
+        }
         if(d.candidates?.[0]?.content)setTestStatus({ok:true,model});
         else throw new Error("Sin respuesta del modelo.");
       } else {
@@ -424,50 +428,49 @@ function App(){
       const prompt=`Evalúa la respuesta del estudiante. Devuelve SOLO JSON sin texto extra.\n\nP: ${card.front}\nCorrecta: ${card.back}\nEstudiante: ${ans.trim()}\n\nRegla estricta: incorrecta=0, parcial=1, correcta=2, perfecta=3.\n{"missed":"","didWell":"","suggestion":0}`;
 
       if(apiProvider==="gemini"){
-        let modelToUse=null;
-        try{
-          const listRes=await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
-          const listData=await listRes.json();
-          if(listData.models){
-            const supported=listData.models
-              .filter(m=>m.supportedGenerationMethods?.includes("generateContent"))
-              .filter(m=>m.name.includes("gemini"))
-              .map(m=>m.name.replace("models/",""));
-            if(supported.length>0)modelToUse=supported[0];
-          }
-        }catch(e){}
-        const fallbacks=["gemini-2.5-flash","gemini-2.0-flash","gemini-2.0-flash-lite","gemini-1.5-flash"];
-        const modelsToTry=modelToUse?[modelToUse,...fallbacks.filter(m=>m!==modelToUse)]:fallbacks;
-
-        // Simpler prompt that always produces JSON
-        const geminiPrompt=`Evalúa esta flashcard. Responde SOLO con JSON en una sola línea.
-
-P: ${card.front}
-Correcta: ${card.back}
-Estudiante: ${ans.trim()}
-
-JSON (suggestion: 0=incorrecto 1=parcial 2=correcto 3=perfecto):
-{"missed":"texto breve","didWell":"texto breve","suggestion":0}`;
-
-        let lastErr=null;
-        for(const model of modelsToTry){
+        // Use cached model if available, otherwise discover
+        let modelToUse=ls.get("fai_gemini_model")||null;
+        if(!modelToUse){
           try{
-            const body={
-              contents:[{parts:[{text:geminiPrompt}]}],
-              generationConfig:{maxOutputTokens:512,temperature:0}
-            };
-            const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,{
-              method:"POST",headers:{"Content-Type":"application/json"},
-              body:JSON.stringify(body)
-            });
-            const data=await res.json();
-            if(data.error){lastErr=data.error.message;continue;}
-            const txt=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
-            console.log(`[FlashAI] Gemini ${model} raw:`,JSON.stringify(txt));
-            if(txt){aiText=txt;break;}
-          }catch(e){lastErr=e.message;continue;}
+            const listRes=await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+            const listData=await listRes.json();
+            if(listData.models){
+              // Prefer flash-lite (higher free quota) over flash
+              const order=["gemini-2.0-flash-lite","gemini-2.0-flash","gemini-2.5-flash","gemini-1.5-flash"];
+              const available=listData.models
+                .filter(m=>m.supportedGenerationMethods?.includes("generateContent"))
+                .map(m=>m.name.replace("models/",""));
+              modelToUse=order.find(m=>available.includes(m))||available.find(m=>m.includes("gemini"))||null;
+              if(modelToUse)ls.set("fai_gemini_model",modelToUse);
+            }
+          }catch(e){}
         }
-        if(!aiText&&lastErr)throw new Error("Gemini: "+lastErr);
+        if(!modelToUse)throw new Error("No se encontró ningún modelo de Gemini disponible.");
+
+        const geminiPrompt=`Evalúa esta flashcard. Responde SOLO con JSON en una sola línea.\n\nP: ${card.front}\nCorrecta: ${card.back}\nEstudiante: ${ans.trim()}\n\nJSON (suggestion: 0=incorrecto 1=parcial 2=correcto 3=perfecto):\n{"missed":"texto breve","didWell":"texto breve","suggestion":0}`;
+
+        const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelToUse}:generateContent?key=${apiKey}`,{
+          method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({contents:[{parts:[{text:geminiPrompt}]}],generationConfig:{maxOutputTokens:512,temperature:0}})
+        });
+        const data=await res.json();
+        // Detect quota/rate limit
+        if(data.error){
+          const msg=data.error.message||"";
+          const retryMatch=msg.match(/retry in ([\d.]+)s/i);
+          if(msg.includes("quota")||msg.includes("RESOURCE_EXHAUSTED")||res.status===429){
+            const wait=retryMatch?Math.ceil(parseFloat(retryMatch[1])):60;
+            throw new Error(`Límite de uso alcanzado. Espera ${wait} segundos e intenta de nuevo.`);
+          }
+          // If model not found, clear cache and retry with discovery
+          if(msg.includes("not found")||msg.includes("404")){
+            ls.del("fai_gemini_model");
+            throw new Error(`Modelo no disponible. Recarga la página para detectar uno nuevo.`);
+          }
+          throw new Error(msg);
+        }
+        aiText=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
+        console.log("[FlashAI] Gemini response:",JSON.stringify(aiText));
       } else {
         const res=await fetch("https://api.anthropic.com/v1/messages",{
           method:"POST",
