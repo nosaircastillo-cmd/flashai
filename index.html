@@ -328,31 +328,44 @@ function App(){
     const k=(apiKeyInput.trim()||apiKey);
     if(!k){alert("Pega una API key primero.");return;}
     setTestStatus("testing");
+    // Always clear cached model when manually testing so we re-discover
+    ls.del("fai_gemini_model");
     try{
       if(apiProvider==="gemini"){
         const listRes=await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${k}`);
         const listData=await listRes.json();
         if(listData.error)throw new Error(listData.error.message||listData.error.status);
-        const order=["gemini-2.0-flash-lite","gemini-2.0-flash","gemini-2.5-flash","gemini-1.5-flash"];
+        // Prefer high-quota free models first
+        const order=["gemini-2.0-flash-lite","gemini-2.0-flash","gemini-1.5-flash-8b","gemini-2.5-flash","gemini-1.5-flash"];
         const available=listData.models
           ?.filter(m=>m.supportedGenerationMethods?.includes("generateContent"))
           ?.map(m=>m.name.replace("models/",""))||[];
-        const model=order.find(m=>available.includes(m))||available.find(m=>m.includes("gemini"));
-        if(!model)throw new Error("No se encontraron modelos disponibles.");
-        // Cache the working model
-        ls.set("fai_gemini_model",model);
-        const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${k}`,{
-          method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({contents:[{parts:[{text:"Responde solo: OK"}]}],generationConfig:{maxOutputTokens:5}})
-        });
-        const d=await res.json();
-        if(d.error){
-          if(d.error.message?.includes("quota")||d.error.message?.includes("RESOURCE_EXHAUSTED"))
-            throw new Error("Límite de uso alcanzado. Espera 1 minuto.");
-          throw new Error(d.error.message);
+        const ranked=order.filter(m=>available.includes(m));
+        // Also add any available gemini model not in our list
+        available.filter(m=>m.includes("gemini")&&!ranked.includes(m)).forEach(m=>ranked.push(m));
+        if(ranked.length===0)throw new Error("No se encontraron modelos disponibles.");
+        // Try each model until one works (skip rate-limited ones)
+        let workingModel=null,lastErr="";
+        for(const model of ranked){
+          try{
+            const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${k}`,{
+              method:"POST",headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({contents:[{parts:[{text:"Di OK"}]}],generationConfig:{maxOutputTokens:5}})
+            });
+            const d=await res.json();
+            if(d.error){
+              const msg=d.error.message||"";
+              if(msg.includes("quota")||msg.includes("RESOURCE_EXHAUSTED")||msg.includes("429")){
+                lastErr=`${model}: cuota agotada`;continue; // try next model
+              }
+              lastErr=msg;continue;
+            }
+            if(d.candidates?.[0]?.content){workingModel=model;break;}
+          }catch(e){lastErr=e.message;continue;}
         }
-        if(d.candidates?.[0]?.content)setTestStatus({ok:true,model});
-        else throw new Error("Sin respuesta del modelo.");
+        if(!workingModel)throw new Error(lastErr||"Todos los modelos tienen cuota agotada. Intenta mañana.");
+        ls.set("fai_gemini_model",workingModel);
+        setTestStatus({ok:true,model:workingModel});
       } else {
         const res=await fetch("https://api.anthropic.com/v1/messages",{
           method:"POST",
@@ -428,15 +441,13 @@ function App(){
       const prompt=`Evalúa la respuesta del estudiante. Devuelve SOLO JSON sin texto extra.\n\nP: ${card.front}\nCorrecta: ${card.back}\nEstudiante: ${ans.trim()}\n\nRegla estricta: incorrecta=0, parcial=1, correcta=2, perfecta=3.\n{"missed":"","didWell":"","suggestion":0}`;
 
       if(apiProvider==="gemini"){
-        // Use cached model if available, otherwise discover
         let modelToUse=ls.get("fai_gemini_model")||null;
         if(!modelToUse){
           try{
             const listRes=await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
             const listData=await listRes.json();
             if(listData.models){
-              // Prefer flash-lite (higher free quota) over flash
-              const order=["gemini-2.0-flash-lite","gemini-2.0-flash","gemini-2.5-flash","gemini-1.5-flash"];
+              const order=["gemini-2.0-flash-lite","gemini-2.0-flash","gemini-1.5-flash-8b","gemini-2.5-flash","gemini-1.5-flash"];
               const available=listData.models
                 .filter(m=>m.supportedGenerationMethods?.includes("generateContent"))
                 .map(m=>m.name.replace("models/",""));
@@ -445,7 +456,7 @@ function App(){
             }
           }catch(e){}
         }
-        if(!modelToUse)throw new Error("No se encontró ningún modelo de Gemini disponible.");
+        if(!modelToUse)throw new Error("No se encontró ningún modelo disponible. Abre el modal de IA y presiona Probar.");
 
         const geminiPrompt=`Evalúa esta flashcard. Responde SOLO con JSON en una sola línea.\n\nP: ${card.front}\nCorrecta: ${card.back}\nEstudiante: ${ans.trim()}\n\nJSON (suggestion: 0=incorrecto 1=parcial 2=correcto 3=perfecto):\n{"missed":"texto breve","didWell":"texto breve","suggestion":0}`;
 
@@ -454,19 +465,16 @@ function App(){
           body:JSON.stringify({contents:[{parts:[{text:geminiPrompt}]}],generationConfig:{maxOutputTokens:512,temperature:0}})
         });
         const data=await res.json();
-        // Detect quota/rate limit
         if(data.error){
           const msg=data.error.message||"";
-          const retryMatch=msg.match(/retry in ([\d.]+)s/i);
-          if(msg.includes("quota")||msg.includes("RESOURCE_EXHAUSTED")||res.status===429){
+          if(msg.includes("quota")||msg.includes("RESOURCE_EXHAUSTED")||msg.includes("429")){
+            const retryMatch=msg.match(/retry in ([\d.]+)s/i);
             const wait=retryMatch?Math.ceil(parseFloat(retryMatch[1])):60;
-            throw new Error(`Límite de uso alcanzado. Espera ${wait} segundos e intenta de nuevo.`);
-          }
-          // If model not found, clear cache and retry with discovery
-          if(msg.includes("not found")||msg.includes("404")){
+            // Clear cache so next call rediscovers a working model
             ls.del("fai_gemini_model");
-            throw new Error(`Modelo no disponible. Recarga la página para detectar uno nuevo.`);
+            throw new Error(`Cuota agotada para ${modelToUse}. Abre el modal IA → Probar para cambiar de modelo automáticamente.`);
           }
+          if(msg.includes("not found")){ls.del("fai_gemini_model");throw new Error("Modelo no disponible. Abre IA → Probar para actualizarlo.");}
           throw new Error(msg);
         }
         aiText=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
