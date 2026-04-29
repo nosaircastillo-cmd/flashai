@@ -137,7 +137,162 @@ function Spin({msg="Cargando..."}){
   </div>;
 }
 
-/* ── Smart local evaluator (no API needed) ────────────────────────────────── */
+/* ── LaTeX cleaner ────────────────────────────────────────────────────────── */
+function cleanLatex(text){
+  if(!text)return text;
+  let t=text;
+  // Greek letters & symbols
+  t=t.replace(/\\alpha/g,"α").replace(/\\beta/g,"β").replace(/\\gamma/g,"γ")
+     .replace(/\\delta/g,"δ").replace(/\\Delta/g,"Δ").replace(/\\theta/g,"θ")
+     .replace(/\\mu/g,"μ").replace(/\\pi/g,"π").replace(/\\sigma/g,"σ")
+     .replace(/\\omega/g,"ω").replace(/\\Omega/g,"Ω").replace(/\\lambda/g,"λ")
+     .replace(/\\rho/g,"ρ").replace(/\\tau/g,"τ").replace(/\\phi/g,"φ")
+     .replace(/\\psi/g,"ψ").replace(/\\chi/g,"χ").replace(/\\eta/g,"η");
+  // Relations
+  t=t.replace(/\\geq|\\ge/g,"≥").replace(/\\leq|\\le/g,"≤")
+     .replace(/\\neq|\\ne/g,"≠").replace(/\\approx/g,"≈")
+     .replace(/\\pm/g,"±").replace(/\\times/g,"×").replace(/\\div/g,"÷")
+     .replace(/\\cdot/g,"·").replace(/\\infty/g,"∞");
+  // Arrows
+  t=t.replace(/\\rightarrow/g,"→").replace(/\\leftarrow/g,"←")
+     .replace(/\\Rightarrow/g,"⟹").replace(/\\uparrow/g,"↑").replace(/\\downarrow/g,"↓");
+  // Superscripts: x^{...} or x^n
+  t=t.replace(/\^\{\\circ\}/g,"°").replace(/\^\{degrees?\}/gi,"°");
+  t=t.replace(/\^\{([^}]+)\}/g,(m,p)=>{
+    const sup={"0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹","+":"⁺","-":"⁻","n":"ⁿ"};
+    if(p.length<=3)return p.split("").map(c=>sup[c]||c).join("");
+    return `^(${p})`;
+  });
+  t=t.replace(/\^(\d)/g,(m,p)=>{const sup={"0":"⁰","1":"¹","2":"²","3":"³","4":"⁴","5":"⁵","6":"⁶","7":"⁷","8":"⁸","9":"⁹"};return sup[p]||m;});
+  // Subscripts: x_{...} or x_n
+  t=t.replace(/\_\{([^}]+)\}/g,(m,p)=>{
+    const sub={"0":"₀","1":"₁","2":"₂","3":"₃","4":"₄","5":"₅","6":"₆","7":"₇","8":"₈","9":"₉","+":"₊","-":"₋"};
+    if(p.length<=3)return p.split("").map(c=>sub[c]||c).join("");
+    return `_(${p})`;
+  });
+  t=t.replace(/\_(\d)/g,(m,p)=>{const sub={"0":"₀","1":"₁","2":"₂","3":"₃","4":"₄","5":"₅","6":"₆","7":"₇","8":"₈","9":"₉"};return sub[p]||m;});
+  // Fractions: \frac{a}{b} → a/b
+  t=t.replace(/\\frac\{([^}]+)\}\{([^}]+)\}/g,"$1/$2");
+  // Text commands
+  t=t.replace(/\\text\{([^}]+)\}/g,"$1").replace(/\\textbf\{([^}]+)\}/g,"$1")
+     .replace(/\\textit\{([^}]+)\}/g,"$1").replace(/\\emph\{([^}]+)\}/g,"$1");
+  // Misc
+  t=t.replace(/\\%/g,"%").replace(/\\circ/g,"°").replace(/\\degree/g,"°");
+  t=t.replace(/\\[a-zA-Z]+\{([^}]*)\}/g,"$1"); // catch-all for unknown commands
+  t=t.replace(/\\[a-zA-Z]+/g,""); // remove remaining unknown commands
+  // Remove bare $ signs (math delimiters)
+  t=t.replace(/\$\$[\s\S]*?\$\$/g,m=>m.slice(2,-2).trim());
+  t=t.replace(/\$([^$]+)\$/g,"$1");
+  t=t.replace(/\$/g,"");
+  // Clean up leftover braces, extra spaces
+  t=t.replace(/\{|\}/g,"").replace(/\s{2,}/g," ").trim();
+  return t;
+}
+
+/* ── CSV parser ────────────────────────────────────────────────────────────── */
+function parseCsv(text){
+  const cards=[];
+  const lines=text.split(/\r?\n/);
+  for(const raw of lines){
+    const line=raw.trim();if(!line)continue;
+    // Handle quoted fields properly
+    const fields=[];let cur="",inQ=false;
+    for(let i=0;i<line.length;i++){
+      const ch=line[i];
+      if(ch==='"'&&!inQ&&(i===0||line[i-1]===",")){inQ=true;}
+      else if(ch==='"'&&inQ&&(i===line.length-1||line[i+1]===",")){inQ=false;}
+      else if(ch===","&&!inQ){fields.push(cur);cur="";}
+      else cur+=ch;
+    }
+    fields.push(cur);
+    if(fields.length>=2){
+      const front=cleanLatex(fields[0].replace(/^"|"$/g,"").trim());
+      const back=cleanLatex(fields[1].replace(/^"|"$/g,"").trim());
+      if(front&&back)cards.push({front,back});
+    }
+  }
+  return cards;
+}
+
+/* ── Shared Gemini caller ─────────────────────────────────────────────────── */
+const GEMINI_ORDER=["gemini-2.0-flash-lite","gemini-2.0-flash","gemini-2.5-flash","gemini-1.5-flash"];
+async function callGemini(apiKey,prompt,maxTokens=800){
+  let model=ls.get("fai_gemini_model")||null;
+  if(!model){
+    try{
+      const r=await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+      const d=await r.json();
+      if(d.models){
+        const av=d.models.filter(m=>m.supportedGenerationMethods?.includes("generateContent")).map(m=>m.name.replace("models/",""));
+        model=GEMINI_ORDER.find(m=>av.includes(m))||av.find(m=>m.includes("gemini"))||null;
+        if(model)ls.set("fai_gemini_model",model);
+      }
+    }catch(e){}
+  }
+  if(!model)throw new Error("No hay modelo disponible. Abre IA → Probar.");
+  const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{maxOutputTokens:maxTokens,temperature:0}})
+  });
+  const data=await res.json();
+  if(data.error){
+    const msg=data.error.message||"";
+    if(msg.includes("quota")||msg.includes("RESOURCE_EXHAUSTED")||msg.includes("high demand")||msg.includes("429")||msg.includes("503")){
+      ls.del("fai_gemini_model");throw new Error("Cuota agotada. Espera un momento e intenta de nuevo.");
+    }
+    if(msg.includes("not found")){ls.del("fai_gemini_model");throw new Error("Modelo no disponible. Abre IA → Probar.");}
+    throw new Error(msg);
+  }
+  return data.candidates?.[0]?.content?.parts?.[0]?.text||"";
+}
+
+/* ── Devorador — Auto-organizer ───────────────────────────────────────────── */
+async function devourerOrganize(apiKey,newCards,existingTopics,existingSubs,onProgress){
+  const BATCH=12;
+  const assignments=[];
+  const topicNames=existingTopics.map(t=>t.name);
+  const subNames=existingSubs.map(s=>({s:s.name,t:existingTopics.find(t=>t.id===s.topicId)?.name||"?"}));
+
+  for(let i=0;i<newCards.length;i+=BATCH){
+    const batch=newCards.slice(i,i+BATCH);
+    onProgress&&onProgress(i,newCards.length,batch.length);
+
+    const prompt=`Organiza estas flashcards académicas/médicas en TOPICS y SUBTOPICS.
+
+REGLAS:
+- TOPIC = categoría amplia del tema (ej: "Parto Pretérmino", "Hipertensión en el Embarazo")
+- SUBTOPIC = patología o condición específica (ej: "Preeclampsia", "APP", "RPM", "HELLP")
+- Reutiliza topics/subtopics existentes cuando corresponda semánticamente
+- Crea nuevos solo si el contenido es genuinamente diferente
+- Subtopics deben ser ESPECÍFICOS: una patología, síndrome o procedimiento concreto
+- Cada tarjeta DEBE tener 1 topic y 1 subtopic
+
+TOPICS EXISTENTES: ${topicNames.length?topicNames.join(" | "):"(ninguno)"}
+SUBTOPICS EXISTENTES: ${subNames.length?subNames.map(x=>`${x.s}[en:${x.t}]`).join(" | "):"(ninguno)"}
+
+TARJETAS:
+${batch.map((c,idx)=>`[${idx}] ${c.front} → ${c.back}`).join("\n")}
+
+JSON ÚNICO (sin texto extra):
+{"r":[{"i":0,"t":"Topic","s":"Subtopic"}]}`;
+
+    try{
+      const txt=await callGemini(apiKey,prompt,1400);
+      const st=txt.indexOf("{"),en=txt.lastIndexOf("}");
+      if(st===-1||en<=st)throw new Error("no json");
+      const parsed=JSON.parse(txt.slice(st,en+1));
+      (parsed.r||parsed.assignments||[]).forEach(a=>{
+        const idx=a.i??a.index;
+        if(typeof idx==="number"&&batch[idx])
+          assignments.push({cardId:batch[idx].id,topicName:(a.t||a.topic||"").trim(),subtopicName:(a.s||a.subtopic||"").trim()});
+      });
+    }catch(err){console.error("[Devorador] batch",i,"error:",err.message);}
+    if(i+BATCH<newCards.length)await new Promise(r=>setTimeout(r,1500));
+  }
+  return assignments;
+}
+
+
 function localEval(student, correct, question, noApiKey){
   const s=student.trim().toLowerCase().replace(/\s+/g," ");
   const c=correct.trim().toLowerCase().replace(/\s+/g," ");
@@ -240,7 +395,10 @@ function App(){
   const [cf,setCf]=useState(""); const [cb,setCb]=useState("");
   const [cfI,setCfI]=useState(null); const [cbI,setCbI]=useState(null);
   const [cT,setCT]=useState(""); const [cS,setCS]=useState(""); const [editC,setEditC]=useState(null);
-  const [impTxt,setImpTxt]=useState(""); const [impT,setImpT]=useState(""); const [impS,setImpS]=useState("");
+  const [impTxt,setImpTxt]=useState(""); const [impT,setImpT]=useState(""); const [impS,setImpS]=useState(""); const [impFilename,setImpFilename]=useState("");
+  // Devorador
+  const [devActive,setDevActive]=useState(false);
+  const [devStatus,setDevStatus]=useState(null); // null|{phase,done,total}|{error}|"complete"
   const [docTid,setDocTid]=useState(null); const [docN,setDocN]=useState(""); const [docM,setDocM]=useState(null);
   const [examIn,setExamIn]=useState("");
   const [dataLoaded,setDataLoaded]=useState(false);
@@ -405,7 +563,7 @@ function App(){
   const dDue=id=>(allCards[id]||[]).filter(isDue).length;
   const tLbl=c=>topics.find(t=>t.id===c.topicId)?.name;
   const sLbl=c=>subs.find(s=>s.id===c.subtopicId)?.name;
-  const pc=parseTxt(impTxt).length;
+  const pc=parseImport(impTxt,impFilename).length;
   const card=queue[qIdx];
   const done=queue.length>0&&qIdx>=queue.length;
   const prog=queue.length?Math.min(qIdx/queue.length,1):0;
@@ -441,44 +599,68 @@ function App(){
       const prompt=`Evalúa la respuesta del estudiante. Devuelve SOLO JSON sin texto extra.\n\nP: ${card.front}\nCorrecta: ${card.back}\nEstudiante: ${ans.trim()}\n\nRegla estricta: incorrecta=0, parcial=1, correcta=2, perfecta=3.\n{"missed":"","didWell":"","suggestion":0}`;
 
       if(apiProvider==="gemini"){
-        let modelToUse=ls.get("fai_gemini_model")||null;
-        if(!modelToUse){
-          try{
-            const listRes=await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
-            const listData=await listRes.json();
-            if(listData.models){
-              const order=["gemini-2.0-flash-lite","gemini-2.0-flash","gemini-1.5-flash-8b","gemini-2.5-flash","gemini-1.5-flash"];
-              const available=listData.models
-                .filter(m=>m.supportedGenerationMethods?.includes("generateContent"))
-                .map(m=>m.name.replace("models/",""));
-              modelToUse=order.find(m=>available.includes(m))||available.find(m=>m.includes("gemini"))||null;
-              if(modelToUse)ls.set("fai_gemini_model",modelToUse);
-            }
-          }catch(e){}
-        }
-        if(!modelToUse)throw new Error("No se encontró ningún modelo disponible. Abre el modal de IA y presiona Probar.");
+        let cachedModel=ls.get("fai_gemini_model")||null;
+        // Always get full list to have fallbacks ready
+        let modelList=[];
+        try{
+          const listRes=await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+          const listData=await listRes.json();
+          if(listData.models){
+            const order=["gemini-2.0-flash-lite","gemini-2.0-flash","gemini-1.5-flash-8b","gemini-2.5-flash","gemini-flash-latest","gemini-1.5-flash","gemini-1.5-pro"];
+            const available=listData.models
+              .filter(m=>m.supportedGenerationMethods?.includes("generateContent"))
+              .map(m=>m.name.replace("models/",""));
+            const ranked=order.filter(m=>available.includes(m));
+            available.filter(m=>m.includes("gemini")&&!ranked.includes(m)).forEach(m=>ranked.push(m));
+            modelList=ranked;
+          }
+        }catch(e){}
+        // Put cached model first, then rest of list
+        if(cachedModel&&!modelList.includes(cachedModel))modelList.unshift(cachedModel);
+        else if(cachedModel)modelList=[cachedModel,...modelList.filter(m=>m!==cachedModel)];
+        if(modelList.length===0)throw new Error("No se encontró ningún modelo disponible. Abre IA → Probar.");
 
         const geminiPrompt=`Evalúa esta flashcard. Responde SOLO con JSON en una sola línea.\n\nP: ${card.front}\nCorrecta: ${card.back}\nEstudiante: ${ans.trim()}\n\nJSON (suggestion: 0=incorrecto 1=parcial 2=correcto 3=perfecto):\n{"missed":"texto breve","didWell":"texto breve","suggestion":0}`;
 
-        const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelToUse}:generateContent?key=${apiKey}`,{
-          method:"POST",headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({contents:[{parts:[{text:geminiPrompt}]}],generationConfig:{maxOutputTokens:512,temperature:0}})
-        });
-        const data=await res.json();
-        if(data.error){
-          const msg=data.error.message||"";
-          if(msg.includes("quota")||msg.includes("RESOURCE_EXHAUSTED")||msg.includes("429")){
-            const retryMatch=msg.match(/retry in ([\d.]+)s/i);
-            const wait=retryMatch?Math.ceil(parseFloat(retryMatch[1])):60;
-            // Clear cache so next call rediscovers a working model
-            ls.del("fai_gemini_model");
-            throw new Error(`Cuota agotada para ${modelToUse}. Abre el modal IA → Probar para cambiar de modelo automáticamente.`);
+        let lastErr=null;
+        for(const model of modelList){
+          try{
+            const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,{
+              method:"POST",headers:{"Content-Type":"application/json"},
+              body:JSON.stringify({contents:[{parts:[{text:geminiPrompt}]}],generationConfig:{maxOutputTokens:512,temperature:0}})
+            });
+            const data=await res.json();
+            if(data.error){
+              const msg=data.error.message||"";
+              // Skip this model if overloaded, quota exceeded, or not found
+              if(msg.includes("high demand")||msg.includes("overloaded")||
+                 msg.includes("quota")||msg.includes("RESOURCE_EXHAUSTED")||
+                 msg.includes("not found")||msg.includes("429")||msg.includes("503")){
+                console.log(`[FlashAI] Skipping ${model}: ${msg.slice(0,60)}`);
+                if(cachedModel===model){ls.del("fai_gemini_model");cachedModel=null;}
+                lastErr=`${model} no disponible`;
+                continue;
+              }
+              throw new Error(msg);
+            }
+            const txt=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
+            if(!txt){lastErr=`${model}: respuesta vacía`;continue;}
+            // Found working model - cache it
+            if(ls.get("fai_gemini_model")!==model)ls.set("fai_gemini_model",model);
+            aiText=txt;
+            console.log(`[FlashAI] Used model: ${model}`,JSON.stringify(txt));
+            break;
+          }catch(e){
+            if(e.message.includes("high demand")||e.message.includes("overloaded")||e.message.includes("quota")){
+              lastErr=`${model} ocupado`;continue;
+            }
+            throw e;
           }
-          if(msg.includes("not found")){ls.del("fai_gemini_model");throw new Error("Modelo no disponible. Abre IA → Probar para actualizarlo.");}
-          throw new Error(msg);
         }
-        aiText=data.candidates?.[0]?.content?.parts?.[0]?.text||"";
-        console.log("[FlashAI] Gemini response:",JSON.stringify(aiText));
+        if(!aiText){
+          ls.del("fai_gemini_model");
+          throw new Error(lastErr||"Todos los modelos están ocupados. Intenta en unos minutos.");
+        }
       } else {
         const res=await fetch("https://api.anthropic.com/v1/messages",{
           method:"POST",
@@ -534,7 +716,88 @@ function App(){
   function delS(sId){if(!confirm("¿Eliminar subtopic?"))return;setAllSubs(p=>({...p,[deckId]:(p[deckId]||[]).filter(s=>s.id!==sId)}));setAllCards(p=>({...p,[deckId]:(p[deckId]||[]).map(c=>c.subtopicId===sId?{...c,subtopicId:null}:c)}));if(scope.id===sId)setScope({type:"all"});}
   function openCard(c=null){setEditC(c);setCf(c?.front||"");setCb(c?.back||"");setCfI(c?.frontImg||null);setCbI(c?.backImg||null);const at=c?.topicId||(scope.type==="topic"?scope.id:scope.type==="subtopic"?subs.find(s=>s.id===scope.id)?.topicId||"":"");setCT(at);setCS(c?.subtopicId||(scope.type==="subtopic"?scope.id:""));setModal("card");}
   function saveCard(){if(!cf.trim()&&!cfI)return;const base=editC||{id:uid(),interval:1,repetitions:0,easeFactor:ap.ease,dueDate:null};const nc={...base,front:cf.trim(),back:cb.trim(),frontImg:cfI,backImg:cbI,topicId:cT||null,subtopicId:cS||null};if(editC)setAllCards(p=>({...p,[deckId]:(p[deckId]||[]).map(x=>x.id===nc.id?nc:x)}));else setAllCards(p=>({...p,[deckId]:[...(p[deckId]||[]),nc]}));setModal(null);setEditC(null);}
-  function doImport(){const parsed=parseTxt(impTxt);if(!parsed.length)return;setAllCards(p=>({...p,[deckId]:[...(p[deckId]||[]),...parsed.map(c=>({id:uid(),front:c.front,back:c.back,frontImg:null,backImg:null,topicId:impT||null,subtopicId:impS||null,interval:1,repetitions:0,easeFactor:ap.ease,dueDate:null}))]}));setImpTxt("");setImpT("");setImpS("");setModal(null);}
+  function parseImport(txt,filename=""){
+    const isCsv=filename.toLowerCase().endsWith(".csv")||
+      (txt.includes(",")&&!txt.includes("\t")&&!txt.match(/^[QPqp]:/m));
+    return isCsv?parseCsv(txt):parseTxt(txt);
+  }
+
+  async function runDevourer(newCardIds){
+    if(!apiKey){setDevStatus({error:"Configura tu API key de Gemini para usar el Devorador."});return;}
+    const currentTopics=allTopics[deckId]||[];
+    const currentSubs=allSubs[deckId]||[];
+    const newCards=(allCards[deckId]||[]).filter(c=>newCardIds.includes(c.id));
+    if(!newCards.length)return;
+    setDevStatus({phase:"Analizando tarjetas con IA...",done:0,total:newCards.length});
+    setModal("devourer");
+    try{
+      const assignments=await devourerOrganize(
+        apiKey, newCards, currentTopics, currentSubs,
+        (done,total,batchSize)=>setDevStatus({phase:`Procesando ${done+1}–${Math.min(done+batchSize,total)} de ${total}...`,done,total})
+      );
+      // Build new topics/subtopics needed
+      const topicMap={}; // name -> id (existing or new)
+      const subMap={};   // name+topicId -> id
+      currentTopics.forEach(t=>{topicMap[t.name.toLowerCase()]=t.id;});
+      currentSubs.forEach(s=>{subMap[`${s.name.toLowerCase()}||${s.topicId}`]=s.id;});
+
+      const newTopics=[...currentTopics];
+      const newSubs=[...currentSubs];
+
+      // Ensure all referenced topics/subs exist
+      assignments.forEach(a=>{
+        if(!a.topicName)return;
+        const tk=a.topicName.toLowerCase();
+        if(!topicMap[tk]){
+          const newT={id:uid(),name:a.topicName,addedDate:new Date().toISOString()};
+          newTopics.push(newT);topicMap[tk]=newT.id;
+        }
+        if(!a.subtopicName)return;
+        const tid=topicMap[tk];
+        const sk=`${a.subtopicName.toLowerCase()}||${tid}`;
+        if(!subMap[sk]){
+          const newS={id:uid(),topicId:tid,name:a.subtopicName};
+          newSubs.push(newS);subMap[sk]=newS.id;
+        }
+      });
+
+      // Apply assignments to cards
+      setAllTopics(p=>({...p,[deckId]:newTopics}));
+      setAllSubs(p=>({...p,[deckId]:newSubs}));
+      setAllCards(p=>{
+        const cards=[...(p[deckId]||[])];
+        assignments.forEach(a=>{
+          const idx=cards.findIndex(c=>c.id===a.cardId);
+          if(idx===-1||!a.topicName)return;
+          const tid=topicMap[a.topicName.toLowerCase()];
+          const sid=a.subtopicName?subMap[`${a.subtopicName.toLowerCase()}||${tid}`]:null;
+          cards[idx]={...cards[idx],topicId:tid||null,subtopicId:sid||null};
+        });
+        return {...p,[deckId]:cards};
+      });
+      setDevStatus("complete");
+    }catch(err){
+      setDevStatus({error:err.message||"Error en el Devorador."});
+    }
+  }
+
+  function doImport(){
+    const parsed=parseImport(impTxt,impFilename);
+    if(!parsed.length)return;
+    const newIds=parsed.map(()=>uid());
+    const newCardObjs=parsed.map((c,i)=>({
+      id:newIds[i],front:c.front,back:c.back,frontImg:null,backImg:null,
+      topicId:impT||null,subtopicId:impS||null,
+      interval:1,repetitions:0,easeFactor:ap.ease,dueDate:null
+    }));
+    setAllCards(p=>({...p,[deckId]:[...(p[deckId]||[]),...newCardObjs]}));
+    setImpTxt("");setImpT("");setImpS("");setImpFilename("");setModal(null);
+    // Auto-trigger Devorador if enabled
+    if(devActive){
+      // Small delay so state settles
+      setTimeout(()=>runDevourer(newIds),300);
+    }
+  }
   async function hImg(e,side){const f=e.target.files?.[0];if(!f)return;const r=new FileReader();r.onload=async ev=>{const x=await compressImg(ev.target.result);side==="f"?setCfI(x):setCbI(x);};r.readAsDataURL(f);}
   function toggleE(id){setExpT(p=>{const s=new Set(p);s.has(id)?s.delete(id):s.add(id);return s;});}
   function saveDoc(){setAllTopics(p=>({...p,[deckId]:(p[deckId]||[]).map(t=>t.id===docTid?{...t,docName:docN,docMeta:docM,docDate:new Date().toISOString()}:t)}));setModal(null);setDocTid(null);setDocN("");setDocM(null);}
@@ -803,6 +1066,7 @@ function App(){
     <div style={S.app}>
       <Nav left={<button style={S.gh} onClick={()=>setView("home")}>← Mazos</button>}
         right={<div style={{display:"flex",gap:"4px"}}>
+          <button title={devActive?"🐉 Devorador activo — auto-organiza al importar":"Activar Devorador"} onClick={()=>setDevActive(p=>!p)} style={{...S.bs,padding:"5px 9px",fontSize:"11px",background:devActive?"#1a0a1a":"transparent",borderColor:devActive?"#7c3aed88":"#282828",color:devActive?"#a78bfa":"#888"}}>🐉</button>
           <button style={{...S.bs,padding:"5px 8px",fontSize:"11px"}} onClick={()=>setModal("dprof")}>{(PROF[apId]||PROF.general).icon}</button>
           <button style={{...S.bs,padding:"5px 8px",fontSize:"11px"}} onClick={()=>{setImpTxt("");setImpT("");setImpS("");setModal("imp");}}>↑</button>
           <button style={{...S.bp(dc),padding:"5px 8px",fontSize:"11px"}} onClick={()=>openCard()}>+</button>
@@ -825,6 +1089,21 @@ function App(){
         <button style={{...S.bs,padding:"4px 10px",fontSize:"10px",borderColor:"#818cf833",color:"#818cf8"}} onClick={()=>{setExamIn("");setModal("exam");}}>+ Fecha</button>
       </div>}
       {saving&&<div style={{background:"#0a1a0a",padding:"4px 18px",fontSize:"10px",color:"#4ade80"}}>● Guardando...</div>}
+
+      {/* Devorador banner */}
+      {devActive&&<div style={{background:"#110820",borderBottom:"1px solid #2d1a4a",padding:"8px 18px",display:"flex",alignItems:"center",gap:"10px",flexWrap:"wrap"}}>
+        <span style={{fontSize:"16px"}}>🐉</span>
+        <div style={{flex:1}}>
+          <span style={{fontSize:"12px",color:"#a78bfa",fontWeight:"700"}}>Devorador activo</span>
+          <span style={{fontSize:"11px",color:"#555",marginLeft:"8px"}}>Las tarjetas importadas se auto-organizarán en topics/subtopics con IA</span>
+        </div>
+        {dCards.filter(c=>!c.topicId).length>0&&
+          <button onClick={()=>runDevourer(dCards.filter(c=>!c.topicId).map(c=>c.id))}
+            style={{...S.bs,padding:"5px 12px",fontSize:"11px",borderColor:"#7c3aed44",color:"#a78bfa"}}>
+            🐉 Organizar {dCards.filter(c=>!c.topicId).length} sin asignar
+          </button>}
+        <button onClick={()=>setDevActive(false)} style={{background:"none",border:"none",color:"#3a3a3a",cursor:"pointer",fontSize:"12px"}}>✕</button>
+      </div>}
 
       <div style={{display:"flex",minHeight:"calc(100vh - 52px)"}}>
         {/* Sidebar */}
@@ -985,21 +1264,57 @@ function App(){
         </div>
       </div>}
       {modal==="imp"&&<div style={S.ov} onClick={e=>e.target===e.currentTarget&&setModal(null)}>
-        <div style={S.mo(500)}>
-          <h2 style={{margin:"0 0 4px",fontSize:"17px",fontWeight:"800"}}>Importar .txt</h2>
-          <p style={{color:MT,fontSize:"11px",margin:"0 0 10px"}}>Q:/A: · separado por ; | o tab</p>
-          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px",marginBottom:"10px"}}>
+        <div style={S.mo(520)}>
+          <h2 style={{margin:"0 0 4px",fontSize:"17px",fontWeight:"800"}}>Importar tarjetas</h2>
+          <p style={{color:MT,fontSize:"11px",margin:"0 0 12px"}}>Soporta <b style={{color:"#4ade80"}}>.csv</b> (coma), <b style={{color:"#818cf8"}}>.txt</b> (Q:/A:, ; | tab) — limpia LaTeX automáticamente</p>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px",marginBottom:"12px"}}>
             <div><div style={S.lbl}>TOPIC</div><select style={S.sel} value={impT} onChange={e=>{setImpT(e.target.value);setImpS("");}}><option value="">Sin topic</option>{topics.map(t=><option key={t.id} value={t.id}>{t.name}</option>)}</select></div>
             <div><div style={S.lbl}>SUBTOPIC</div><select style={{...S.sel,opacity:impT?1:.4}} value={impS} onChange={e=>setImpS(e.target.value)} disabled={!impT}><option value="">Sin subtopic</option>{tSubs(impT).map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></div>
           </div>
-          <div style={S.lbl}>ARCHIVO .TXT</div>
-          <input type="file" accept=".txt,.csv" style={{...S.inp,padding:"6px 10px",cursor:"pointer"}} onChange={e=>{const f=e.target.files?.[0];if(f){const r=new FileReader();r.onload=ev=>setImpTxt(ev.target.result);r.readAsText(f,"UTF-8");}}}/>
-          <div style={{...S.lbl,marginTop:"10px"}}>O PEGAR TEXTO</div>
-          <textarea style={{...S.inp,marginTop:"5px",minHeight:"90px",resize:"vertical",fontFamily:"monospace",fontSize:"12px",lineHeight:1.6}} placeholder={"Q: ¿Qué son los miomas?\nA: Tumores benignos del músculo liso"} value={impTxt} onChange={e=>setImpTxt(e.target.value)}/>
-          <div style={{fontSize:"11px",marginTop:"5px",color:pc>0?"#4ade80":MT}}>{pc>0?`✓ ${pc} tarjeta${pc!==1?"s":""} detectada${pc!==1?"s":""}` :"Pega texto para previsualizar"}</div>
-          <div style={{display:"flex",gap:"8px",marginTop:"12px",justifyContent:"flex-end"}}>
-            <button style={S.bs} onClick={()=>setModal(null)}>Cancelar</button>
-            <button style={{...S.bp(dc),opacity:pc?1:.35}} onClick={doImport}>Importar{pc>0?` (${pc})`:""}</button>
+          <div style={S.lbl}>ARCHIVO (.csv o .txt)</div>
+          <input type="file" accept=".txt,.csv" style={{...S.inp,padding:"6px 10px",cursor:"pointer"}} onChange={e=>{
+            const f=e.target.files?.[0];if(!f)return;
+            setImpFilename(f.name);
+            const r=new FileReader();
+            r.onload=ev=>setImpTxt(ev.target.result);
+            r.readAsText(f,"UTF-8");
+          }}/>
+          <div style={{...S.lbl,marginTop:"12px"}}>O PEGAR TEXTO</div>
+          <textarea style={{...S.inp,marginTop:"5px",minHeight:"90px",resize:"vertical",fontFamily:"monospace",fontSize:"12px",lineHeight:1.6}}
+            placeholder={"CSV: Pregunta,Respuesta\nTXT: Q: ¿Pregunta?\nA: Respuesta"}
+            value={impTxt} onChange={e=>{setImpTxt(e.target.value);setImpFilename("");}}/>
+
+          {/* Detection badge */}
+          {impTxt&&<div style={{fontSize:"11px",marginTop:"6px",display:"flex",alignItems:"center",gap:"8px",flexWrap:"wrap"}}>
+            {pc>0?(
+              <>
+                <span style={{color:"#4ade80",fontWeight:"700"}}>✓ {pc} tarjeta{pc!==1?"s":""} detectada{pc!==1?"s":""}</span>
+                <span style={{color:"#3a3a3a",background:"#181818",padding:"2px 8px",borderRadius:"5px",fontSize:"10px"}}>
+                  {impFilename.endsWith(".csv")||(impTxt.includes(",")&&!impTxt.match(/^[QPqp]:/m))?"📊 Formato CSV":"📄 Formato TXT"}
+                </span>
+                {impTxt.match(/\$|\\ge|\\le|\\frac|\\circ|\\times|\\alpha/)&&
+                  <span style={{color:"#fbbf24",background:"#1a1500",padding:"2px 8px",borderRadius:"5px",fontSize:"10px"}}>⚡ LaTeX detectado — se limpiará automáticamente</span>}
+              </>
+            ):<span style={{color:MT}}>Pega texto o sube archivo para previsualizar</span>}
+          </div>}
+
+          {/* Preview of first 3 cleaned cards */}
+          {pc>0&&(()=>{
+            const preview=parseImport(impTxt,impFilename).slice(0,3);
+            return<div style={{marginTop:"10px",display:"flex",flexDirection:"column",gap:"5px"}}>
+              <div style={{...S.lbl,marginBottom:"4px"}}>VISTA PREVIA (primeras {Math.min(3,pc)} tarjetas)</div>
+              {preview.map((c,i)=><div key={i} style={{background:"#0f0f0f",borderRadius:"8px",padding:"8px 12px",border:"1px solid #1e1e1e"}}>
+                <div style={{fontSize:"11px",color:"#888",marginBottom:"2px"}}>#{i+1}</div>
+                <div style={{fontSize:"12px",fontWeight:"600",color:TX,marginBottom:"3px"}}>{c.front}</div>
+                <div style={{fontSize:"11px",color:"#666",borderTop:"1px solid #1a1a1a",paddingTop:"3px",marginTop:"3px"}}>{c.back}</div>
+              </div>)}
+              {pc>3&&<div style={{fontSize:"11px",color:"#3a3a3a",textAlign:"center"}}>...y {pc-3} más</div>}
+            </div>;
+          })()}
+
+          <div style={{display:"flex",gap:"8px",marginTop:"14px",justifyContent:"flex-end"}}>
+            <button style={S.bs} onClick={()=>{setModal(null);setImpTxt("");setImpFilename("");}}>Cancelar</button>
+            <button style={{...S.bp(dc),opacity:pc?1:.35}} onClick={doImport}>Importar {pc>0?`(${pc} tarjetas)`:""}</button>
           </div>
         </div>
       </div>}
